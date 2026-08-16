@@ -10,7 +10,6 @@ import jakarta.persistence.GenerationType;
 import jakarta.persistence.Id;
 import jakarta.persistence.Table;
 import lombok.Getter;
-import lombok.Setter;
 
 import java.time.LocalDateTime;
 
@@ -21,7 +20,7 @@ import org.springframework.data.jpa.domain.support.AuditingEntityListener;
 @Entity
 @Table(name = "users")
 @EntityListeners(AuditingEntityListener.class)
-@Getter @Setter
+@Getter
 public class User {
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
@@ -54,4 +53,34 @@ public class User {
     @Column(name = "updated_at", nullable = false)
     @LastModifiedDate
     private LocalDateTime updatedAt;
+
+
+    public User() {}
+
+    public User(String firstName, String lastName, String username, String passwordHash, String email) {
+        this.firstName = firstName;
+        this.lastName = lastName;
+        this.username = username;
+        this.passwordHash = passwordHash;
+        this.email = email;
+        this.status = UserStatus.ACTIVE;
+    }
+
+    public void updateUserProfile(String firstName, String lastName, String username) {
+        this.firstName = firstName;
+        this.lastName = lastName;
+        this.username = username;
+    }
+
+    public void changePassword(String newPasswordHashed) {
+        this.passwordHash = newPasswordHashed;
+    }
+
+    public void disable() {
+        this.status = UserStatus.DISABLED;
+    }
+
+    public void enable() {
+        this.status = UserStatus.ACTIVE;
+    }
 }

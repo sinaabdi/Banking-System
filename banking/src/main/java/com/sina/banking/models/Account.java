@@ -45,4 +45,26 @@ public class Account {
 
     @LastModifiedDate
     private LocalDateTime updatedAt;
+
+    public Account() {}
+
+    public Account(User user, Long accountNumber, AccountType type, String currency) {
+        this.user = user;
+        this.accountNumber = accountNumber;
+        this.type = type;
+        this.currency = currency;
+        this.status = AccountStatus.ACTIVE;
+    }
+
+    public void freeze() {
+        this.status = AccountStatus.FROZEN;
+    }
+
+    public void close() {
+        this.status = AccountStatus.CLOSED;
+    }
+
+    public void active() {
+        this.status = AccountStatus.ACTIVE;
+    }
 }
