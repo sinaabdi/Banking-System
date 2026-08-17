@@ -7,6 +7,7 @@ import com.sina.banking.models.User;
 import com.sina.banking.repositories.AccountRepository;
 import com.sina.banking.repositories.LedgerEntryRepository;
 import com.sina.banking.repositories.UserRepository;
+import com.sina.banking.utils.AccountNumberGenerator;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -30,8 +31,7 @@ public class AccountService {
     public AccountResponse createAccount(CreateAccountRequest request) {
         User user = userRepository.findById(request.userId()).orElseThrow(() -> new NoSuchElementException("user not found: " + request.userId()));
 
-        //TODO: generate account number
-        Long accountNumber = 1111_2222_3333_4444L;
+        Long accountNumber = generateAccountNumber();
 
         Account account = new Account(user, accountNumber, request.type(), request.currency());
 
@@ -79,5 +79,10 @@ public class AccountService {
 
     private Account findAccountOrThrow(Integer id) {
         return accountRepository.findById(id).orElseThrow(() -> new NoSuchElementException("account not found: " + id));
+    }
+
+    private Long generateAccountNumber() {
+        Long seed = accountRepository.nextAccountNumberSeed();
+        return AccountNumberGenerator.withCheckDigit(seed);
     }
 }

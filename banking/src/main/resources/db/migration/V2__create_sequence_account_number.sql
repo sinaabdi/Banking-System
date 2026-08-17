@@ -1,0 +1,2 @@
+CREATE SEQUENCE account_number_seq
+    START WITH  1000000000;
