@@ -66,10 +66,10 @@ public class User {
         this.status = UserStatus.ACTIVE;
     }
 
-    public void updateUserProfile(String firstName, String lastName, String username) {
+    public void updateUserProfile(String firstName, String lastName, String email) {
         this.firstName = firstName;
         this.lastName = lastName;
-        this.username = username;
+        this.email = email;
     }
 
     public void changePassword(String newPasswordHashed) {

@@ -37,4 +37,48 @@ public class Transaction {
 
     @LastModifiedDate
     private LocalDateTime updatedAt;
+
+    public Transaction() {}
+
+    public Transaction(TransactionType type, TransactionStatus status, String idempotencyKey) {
+        this.type = type;
+        this.status = status;
+        this.idempotencyKey = idempotencyKey;
+    }
+
+    public void pendingTransaction() {
+        this.status = TransactionStatus.PENDING;
+    }
+
+    public void postedTransaction() {
+        this.status = TransactionStatus.POSTED;
+    }
+
+    public void failedTransaction() {
+        this.status = TransactionStatus.FAILED;
+    }
+
+    public void revesedTransaction() {
+        this.status = TransactionStatus.REVERSED;
+    }
+
+    public void transferTransaction() {
+        this.type = TransactionType.TRANSFER;
+    }
+
+    public void depositTransaction() {
+        this.type = TransactionType.DEPOSIT;
+    }
+
+    public void withdrawlTransaction() {
+        this.type = TransactionType.WITHDRAWAL;
+    }
+
+    public void feeTransaction() {
+        this.type = TransactionType.FEE;
+    }
+
+    public void reversalTransaction() {
+        this.type = TransactionType.REVERSAL;
+    }
 }

@@ -8,6 +8,8 @@ import com.sina.banking.repositories.AccountRepository;
 import com.sina.banking.repositories.LedgerEntryRepository;
 import com.sina.banking.repositories.UserRepository;
 import com.sina.banking.utils.AccountNumberGenerator;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -16,6 +18,8 @@ import java.util.NoSuchElementException;
 
 @Service
 public class AccountService {
+
+    private static final Logger log = LoggerFactory.getLogger(AccountService.class);
 
     private final AccountRepository accountRepository;
     private final UserRepository userRepository;
@@ -36,6 +40,7 @@ public class AccountService {
         Account account = new Account(user, accountNumber, request.type(), request.currency());
 
         Account saved = accountRepository.save(account);
+        log.info("Created account id={} userId={} type={} currency={}", saved.getId(), user.getId(), saved.getType(), saved.getCurrency());
         return AccountResponse.from(saved);
     }
 
@@ -43,18 +48,21 @@ public class AccountService {
     public void freezeAccount(Integer id) {
         Account account = findAccountOrThrow(id);
         account.freeze();
+        log.info("Froze account id={}", id);
     }
 
     @Transactional
     public void closeAccount(Integer id) {
         Account account = findAccountOrThrow(id);
         account.close();
+        log.info("Closed account id={}", id);
     }
 
     @Transactional
     public void activeAccount(Integer id) {
         Account account = findAccountOrThrow(id);
         account.active();
+        log.info("Activated account id={}", id);
     }
 
     public long getBalance(Integer accountId) {

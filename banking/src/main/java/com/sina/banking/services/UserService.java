@@ -6,6 +6,8 @@ import com.sina.banking.DTOs.UserDtos.UserResponse;
 import com.sina.banking.DTOs.UserDtos.CreateUserRequest;
 import com.sina.banking.models.User;
 import com.sina.banking.repositories.UserRepository;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -14,6 +16,8 @@ import java.util.NoSuchElementException;
 
 @Service
 public class UserService {
+
+    private static final Logger log = LoggerFactory.getLogger(UserService.class);
 
     private final UserRepository userRepository;
 
@@ -36,6 +40,7 @@ public class UserService {
         User user = new User(request.firstName(), request.lastName(), request.username(), hash, request.email());
 
         User save = userRepository.save(user);
+        log.info("Created user id={} username={}", save.getId(), save.getUsername());
         return UserResponse.from(save);
     }
 
@@ -44,6 +49,7 @@ public class UserService {
         User user = findUserByIdOrThrow(id);
 
         user.updateUserProfile(request.firstName(), request.lastName(), request.email());
+        log.info("Updated profile for user id={}", id);
         return UserResponse.from(user);
     }
 
@@ -56,22 +62,26 @@ public class UserService {
         String newPasswordHashed = request.newPassword();
 
         if(!user.getPasswordHash().equals(currentPasswordHashed)) {
+            log.warn("Rejected password change for user id={}: current password did not match", id);
             throw new IllegalArgumentException("current password is incorrect");
         }
 
         user.changePassword(newPasswordHashed);
+        log.info("Password changed for user id={}", id);
     }
 
     @Transactional
     public void disableUser(Integer id) {
         User user = findUserByIdOrThrow(id);
         user.disable();
+        log.info("Disabled user id={}", id);
     }
 
     @Transactional
     public void enableUser(Integer id) {
         User user = findUserByIdOrThrow(id);
         user.enable();
+        log.info("Enabled user id={}", id);
     }
 
     public UserResponse getUserById(Integer id) {

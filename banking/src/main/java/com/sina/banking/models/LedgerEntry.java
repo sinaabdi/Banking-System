@@ -13,7 +13,7 @@ import java.time.LocalDateTime;
 @Entity
 @Table(name = "ledger_entries")
 @EntityListeners(AuditingEntityListener.class)
-@Getter @AllArgsConstructor @NoArgsConstructor(access = AccessLevel.PROTECTED)
+@Getter
 public class LedgerEntry {
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
@@ -39,4 +39,14 @@ public class LedgerEntry {
 
     @CreatedDate
     private LocalDateTime createdAt;
+
+    public LedgerEntry() {}
+
+    public LedgerEntry(Transaction transaction, Account account, TransactionDirection direction, Long amount, String currency) {
+        this.transaction = transaction;
+        this.account = account;
+        this.direction = direction;
+        this.amount = amount;
+        this.currency = currency;
+    }
 }
