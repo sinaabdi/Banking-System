@@ -188,6 +188,7 @@ public class UserServiceTest {
                 .hasMessageContaining("User not found");
     }
 
+    @SuppressWarnings("null")
     @Test
     void getAllUsers_getListOfUsers() {
         User anotherUser = new User("Jane", "Smith", "testuser", "password", "janesmith@bank.local");

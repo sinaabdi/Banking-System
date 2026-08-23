@@ -4,9 +4,7 @@ import com.sina.banking.models.LedgerEntry;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
-import org.springframework.stereotype.Repository;
 
-@Repository
 public interface LedgerEntryRepository extends JpaRepository<LedgerEntry, Long> {
     @Query("""
     select coalesce(sum (
