@@ -45,23 +45,13 @@ public class TransactionService {
         }
 
         // fetch account
-        log.info("Fetching account for account id: {} ...", request.accountId());
         Account destinationAccount = accountRepository.findById(request.accountId())
                 .orElseThrow(() -> new NoSuchElementException("account does not exists: " + request.accountId()));
 
         // check account status
-        log.info("Checking account status...");
-        if (destinationAccount.getStatus() != AccountStatus.ACTIVE) {
-            log.warn("Account {} is not in active state.", destinationAccount.getId());
-            throw new IllegalArgumentException("the account is not active");
-        }
-
+        checkDestinationAccountActiveOrElseThrow(destinationAccount);
         // check if currency is correct
-        log.info("Checking currency...");
-        if (!request.currency().equals(destinationAccount.getCurrency())) {
-            log.warn("Currency mismatch, request currency: {}, destination account currency: {}", request.currency(), destinationAccount.getCurrency());
-            throw new IllegalArgumentException("currency mismatch: account is " + destinationAccount.getCurrency());
-        }
+        checkCurrencyMatchOrElseThrow(destinationAccount, request);
 
         Account cashAccount = accountRepository.findAccountByTypeAndCurrency(AccountType.SYSTEM, request.currency())
                 .orElseThrow(() -> new NoSuchElementException("no system account is defined for this currency: " + request.currency()));
@@ -84,6 +74,51 @@ public class TransactionService {
         return TransactionResponse.from(transaction);
     }
 
+    @Transactional
+    public TransactionResponse withdraw(CreateTransactionRequest request) {
+        Optional<Transaction> existing = transactionRepository.findByIdempotencyKey(request.idempotencyKey());
+        if (existing.isPresent()) {
+            log.info("Withdraw replay for idempotencyKey={} -> returning existing transaction id={}",
+                    request.idempotencyKey(), existing.get().getId());
+            return TransactionResponse.from(existing.get());
+        }
+
+        if (request.amount() <= 0) {
+            throw new IllegalArgumentException("withdraw amount must be positive");
+        }
+
+        Account destinationAccount = accountRepository.findByIdForUpdate(request.accountId())
+                .orElseThrow(() -> new NoSuchElementException("account does not exists: " + request.accountId()));
+
+        checkDestinationAccountActiveOrElseThrow(destinationAccount);
+        checkCurrencyMatchOrElseThrow(destinationAccount, request);
+
+        Long balance = ledgerEntryRepository.computeBalanceForAccount(destinationAccount.getId());
+        if (request.amount() > balance) {
+            log.warn("not enough balance for withdraw for account id {} - balance: {}", destinationAccount.getId(), balance);
+            throw new IllegalArgumentException("insufficient funds");
+        }
+
+        Account cashAccount = accountRepository.findAccountByTypeAndCurrency(AccountType.SYSTEM, request.currency())
+                .orElseThrow(() -> new NoSuchElementException("no system account is defined for this currency: " + request.currency()));
+
+        Transaction transaction = new Transaction(TransactionType.WITHDRAWAL, TransactionStatus.PENDING, request.idempotencyKey());
+        transaction = transactionRepository.save(transaction);
+
+        LedgerEntry debitEntry = new LedgerEntry(transaction, destinationAccount, TransactionDirection.DEBIT, request.amount(), request.currency());
+        LedgerEntry creditEntry = new LedgerEntry(transaction, cashAccount, TransactionDirection.CREDIT, request.amount(), request.currency());
+
+        ledgerEntryRepository.save(debitEntry);
+        ledgerEntryRepository.save(creditEntry);
+
+        transaction.postedTransaction();
+
+        log.info("Posted withdraw transaction id={} accountId={} cashAccountId={} amount={} currency={}",
+                transaction.getId(), destinationAccount.getId(), cashAccount.getId(), request.amount(), request.currency());
+
+        return TransactionResponse.from(transaction);
+    }
+
     public TransactionResponse getTransactionById(Integer id) {
         return TransactionResponse.from(findTransactionOrThrow(id));
     }
@@ -96,5 +131,19 @@ public class TransactionService {
 
     private Transaction findTransactionOrThrow(Integer id) {
         return transactionRepository.findById(id).orElseThrow(() -> new NoSuchElementException("transaction not found: " + id));
+    }
+
+    private void checkDestinationAccountActiveOrElseThrow(Account account) {
+        if (account.getStatus() != AccountStatus.ACTIVE) {
+            log.warn("Account {} is not in active state.", account.getId());
+            throw new IllegalArgumentException("the account is not active");
+        }
+    }
+
+    private void checkCurrencyMatchOrElseThrow(Account account, CreateTransactionRequest request) {
+        if (!request.currency().equals(account.getCurrency())) {
+            log.warn("Currency mismatch, request currency: {}, destination account currency: {}", request.currency(), account.getCurrency());
+            throw new IllegalArgumentException("currency mismatch: account is " + account.getCurrency());
+        }
     }
 }
