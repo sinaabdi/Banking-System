@@ -1,5 +1,6 @@
 package com.sina.banking.services;
 
+import com.sina.banking.DTOs.TransactionDtos.TransferRequest;
 import com.sina.banking.DTOs.TransactionDtos.TransactionResponse;
 import com.sina.banking.DTOs.TransactionDtos.CreateTransactionRequest;
 import com.sina.banking.models.*;
@@ -18,8 +19,7 @@ import java.util.List;
 import java.util.NoSuchElementException;
 import java.util.Optional;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.*;
 
@@ -37,17 +37,27 @@ public class TransactionServiceTest {
 
     private Account account;
     private Account systemAccount;
+    private Account transferToAccount;
     private CreateTransactionRequest request;
+    private TransferRequest transferRequest;
 
     @BeforeEach
     void setup(){
         account = mock(Account.class);
         systemAccount = mock(Account.class);
+        transferToAccount = mock(Account.class);
         request = new CreateTransactionRequest(
                 "idem-key-123",
                 100L,
                 "USD",
                 1);
+        transferRequest = new TransferRequest(
+                "idem-key-123",
+                100L,
+                "USD",
+                1,
+                10
+        );
     }
 
     @Test
@@ -215,7 +225,7 @@ public class TransactionServiceTest {
 
 
     @Test
-    void withdraw_amountIsEqualToBalance() {
+    void withdraw_amountIsNotPositive() {
         CreateTransactionRequest zeroAmountRequest = new CreateTransactionRequest("idem-key-123", 0L, "USD", 1);
         when(transactionRepository.findByIdempotencyKey(request.idempotencyKey())).thenReturn(Optional.empty());
 
@@ -280,6 +290,194 @@ public class TransactionServiceTest {
         assertThatThrownBy(() -> transactionService.withdraw(request)).isInstanceOf(NoSuchElementException.class)
                 .hasMessageContaining("no system account is defined for this currency");
     }
+
+    @Test
+    void transfer_happyPath_postTransactionAndCreateTwoLedgerEntries() {
+        when(transactionRepository.findByIdempotencyKey(transferRequest.idempotencyKey())).thenReturn(Optional.empty());
+        when(accountRepository.findByIdForUpdate(transferRequest.fromAccountId())).thenReturn(Optional.of(account));
+        when(accountRepository.findByIdForUpdate(transferRequest.toAccountId())).thenReturn(Optional.of(transferToAccount));
+        when(account.getStatus()).thenReturn(AccountStatus.ACTIVE);
+        when(transferToAccount.getStatus()).thenReturn(AccountStatus.ACTIVE);
+        when(account.getCurrency()).thenReturn(transferRequest.currency());
+        when(transferToAccount.getCurrency()).thenReturn(transferRequest.currency());
+        when(account.getId()).thenReturn(1);
+        when(ledgerEntryRepository.computeBalanceForAccount(transferRequest.fromAccountId())).thenReturn(200L);
+
+        Transaction savedTransaction = new Transaction(TransactionType.TRANSFER, TransactionStatus.PENDING, transferRequest.idempotencyKey());
+        when(transactionRepository.save(any(Transaction.class))).thenReturn(savedTransaction);
+
+        TransactionResponse response = transactionService.transfer(transferRequest);
+
+        assertThat(response).isNotNull();
+
+        ArgumentCaptor<LedgerEntry> captor = ArgumentCaptor.forClass(LedgerEntry.class);
+        verify(ledgerEntryRepository, times(2)).save(captor.capture());
+        List<LedgerEntry> entries = captor.getAllValues();
+
+        LedgerEntry creditEntry = entries.stream().filter(e -> e.getDirection() == TransactionDirection.CREDIT).findFirst().orElseThrow();
+        LedgerEntry debitEntry = entries.stream().filter(e -> e.getDirection() == TransactionDirection.DEBIT).findFirst().orElseThrow();
+
+        assertThat(debitEntry.getAccount()).isEqualTo(account);
+        assertThat(creditEntry.getAccount()).isEqualTo(transferToAccount);
+        assertThat(debitEntry.getAmount()).isEqualTo(transferRequest.amount());
+        assertThat(creditEntry.getAmount()).isEqualTo(transferRequest.amount());
+        assertThat(response.transactionStatus()).isEqualTo(TransactionStatus.POSTED);
+        assertThat(response.transactionType()).isEqualTo(TransactionType.TRANSFER);
+    }
+
+    @Test
+    void transfer_idempotencyKeyAlreadyExists() {
+        Transaction existingTransaction = new Transaction(TransactionType.TRANSFER, TransactionStatus.PENDING, transferRequest.idempotencyKey());
+        when(transactionRepository.findByIdempotencyKey(transferRequest.idempotencyKey())).thenReturn(Optional.of(existingTransaction));
+
+        TransactionResponse response = transactionService.transfer(transferRequest);
+
+        assertThat(response).isNotNull();
+        assertThat(response.idempotencyKey()).isEqualTo(existingTransaction.getIdempotencyKey());
+        assertThat(response.transactionStatus()).isEqualTo(existingTransaction.getStatus());
+
+        verify(transactionRepository, never()).save(any());
+        verifyNoInteractions(ledgerEntryRepository);
+        verifyNoInteractions(accountRepository);
+    }
+
+    @Test
+    void transfer_amountIsNotPositive() {
+        TransferRequest zeroAmountRequest = new TransferRequest(transferRequest.idempotencyKey(), 0L, transferRequest.currency(), transferRequest.fromAccountId(), transferRequest.toAccountId());
+        when(transactionRepository.findByIdempotencyKey(transferRequest.idempotencyKey())).thenReturn(Optional.empty());
+
+        assertThatThrownBy(() -> transactionService.transfer(zeroAmountRequest)).isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("transfer amount must be positive");
+
+        verifyNoInteractions(accountRepository);
+    }
+
+    @Test
+    void transfer_transferAccountToItself() {
+        TransferRequest badRequest = new TransferRequest(
+                transferRequest.idempotencyKey(),
+                transferRequest.amount(),
+                transferRequest.currency(),
+                transferRequest.fromAccountId(),
+                transferRequest.fromAccountId()
+        );
+
+        when(transactionRepository.findByIdempotencyKey(transferRequest.idempotencyKey())).thenReturn(Optional.empty());
+
+        assertThatThrownBy(() -> transactionService.transfer(badRequest)).isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("cannot transfer to the same account");
+
+        verifyNoInteractions(accountRepository);
+    }
+
+    @Test
+    void transfer_sourceAccountDoesNotExists() {
+        when(transactionRepository.findByIdempotencyKey(transferRequest.idempotencyKey())).thenReturn(Optional.empty());
+        when(accountRepository.findByIdForUpdate(transferRequest.fromAccountId())).thenReturn(Optional.empty());
+
+        assertThatThrownBy(() -> transactionService.transfer(transferRequest)).isInstanceOf(NoSuchElementException.class)
+                .hasMessageContaining("account does not exists");
+    }
+
+    @Test
+    void transfer_destinationAccountDoesNotExists() {
+        when(transactionRepository.findByIdempotencyKey(transferRequest.idempotencyKey())).thenReturn(Optional.empty());
+        when(accountRepository.findByIdForUpdate(transferRequest.fromAccountId())).thenReturn(Optional.of(account));
+        when(accountRepository.findByIdForUpdate(transferRequest.toAccountId())).thenReturn(Optional.empty());
+
+        assertThatThrownBy(() -> transactionService.transfer(transferRequest)).isInstanceOf(NoSuchElementException.class)
+                .hasMessageContaining("account does not exists");
+    }
+
+    @Test
+    void transfer_sourceAccountIsNotActive() {
+        when(transactionRepository.findByIdempotencyKey(transferRequest.idempotencyKey())).thenReturn(Optional.empty());
+        when(accountRepository.findByIdForUpdate(transferRequest.fromAccountId())).thenReturn(Optional.of(account));
+        when(accountRepository.findByIdForUpdate(transferRequest.toAccountId())).thenReturn(Optional.of(transferToAccount));
+        when(account.getStatus()).thenReturn(AccountStatus.FROZEN);
+        when(transferToAccount.getStatus()).thenReturn(AccountStatus.ACTIVE);
+
+        assertThatThrownBy(() -> transactionService.transfer(transferRequest)).isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("the account is not active");
+    }
+
+    @Test
+    void transfer_destinationAccountIsNotActive() {
+        when(transactionRepository.findByIdempotencyKey(transferRequest.idempotencyKey())).thenReturn(Optional.empty());
+        when(accountRepository.findByIdForUpdate(transferRequest.fromAccountId())).thenReturn(Optional.of(account));
+        when(accountRepository.findByIdForUpdate(transferRequest.toAccountId())).thenReturn(Optional.of(transferToAccount));
+        when(transferToAccount.getStatus()).thenReturn(AccountStatus.FROZEN);
+
+        assertThatThrownBy(() -> transactionService.transfer(transferRequest)).isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("the account is not active");
+    }
+
+    @Test
+    void transfer_sourceAccountCurrencyMismatch() {
+        when(transactionRepository.findByIdempotencyKey(transferRequest.idempotencyKey())).thenReturn(Optional.empty());
+        when(accountRepository.findByIdForUpdate(transferRequest.fromAccountId())).thenReturn(Optional.of(account));
+        when(accountRepository.findByIdForUpdate(transferRequest.toAccountId())).thenReturn(Optional.of(transferToAccount));
+        when(account.getStatus()).thenReturn(AccountStatus.ACTIVE);
+        when(transferToAccount.getStatus()).thenReturn(AccountStatus.ACTIVE);
+        when(account.getCurrency()).thenReturn("CAD");
+        when(transferToAccount.getCurrency()).thenReturn(transferRequest.currency());
+
+        assertThatThrownBy(() -> transactionService.transfer(transferRequest)).isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("currency mismatch");
+
+    }
+
+    @Test
+    void transfer_destinationAccountCurrencyMismatch() {
+        when(transactionRepository.findByIdempotencyKey(transferRequest.idempotencyKey())).thenReturn(Optional.empty());
+        when(accountRepository.findByIdForUpdate(transferRequest.fromAccountId())).thenReturn(Optional.of(account));
+        when(accountRepository.findByIdForUpdate(transferRequest.toAccountId())).thenReturn(Optional.of(transferToAccount));
+        when(account.getStatus()).thenReturn(AccountStatus.ACTIVE);
+        when(transferToAccount.getStatus()).thenReturn(AccountStatus.ACTIVE);
+        when(account.getCurrency()).thenReturn(transferRequest.currency());
+        when(transferToAccount.getCurrency()).thenReturn("CAD");
+
+        assertThatThrownBy(() -> transactionService.transfer(transferRequest)).isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("currency mismatch");
+
+    }
+
+    @Test
+    void transfer_amountEqualsBalance_succeeds() {
+        when(transactionRepository.findByIdempotencyKey(transferRequest.idempotencyKey())).thenReturn(Optional.empty());
+        when(accountRepository.findByIdForUpdate(transferRequest.fromAccountId())).thenReturn(Optional.of(account));
+        when(accountRepository.findByIdForUpdate(transferRequest.toAccountId())).thenReturn(Optional.of(transferToAccount));
+        when(account.getStatus()).thenReturn(AccountStatus.ACTIVE);
+        when(transferToAccount.getStatus()).thenReturn(AccountStatus.ACTIVE);
+        when(account.getCurrency()).thenReturn(transferRequest.currency());
+        when(transferToAccount.getCurrency()).thenReturn(transferRequest.currency());
+        when(account.getId()).thenReturn(1);
+        when(ledgerEntryRepository.computeBalanceForAccount(transferRequest.fromAccountId())).thenReturn(transferRequest.amount()); // balance == amount
+
+        Transaction savedTransaction = new Transaction(TransactionType.TRANSFER, TransactionStatus.PENDING, transferRequest.idempotencyKey());
+        when(transactionRepository.save(any(Transaction.class))).thenReturn(savedTransaction);
+
+        TransactionResponse response = transactionService.transfer(transferRequest);
+
+        assertThat(response.transactionStatus()).isEqualTo(TransactionStatus.POSTED);
+    }
+
+    @Test
+    void transfer_balanceIsLessThanAmount() {
+        when(transactionRepository.findByIdempotencyKey(transferRequest.idempotencyKey())).thenReturn(Optional.empty());
+        when(accountRepository.findByIdForUpdate(transferRequest.fromAccountId())).thenReturn(Optional.of(account));
+        when(accountRepository.findByIdForUpdate(transferRequest.toAccountId())).thenReturn(Optional.of(transferToAccount));
+        when(account.getStatus()).thenReturn(AccountStatus.ACTIVE);
+        when(transferToAccount.getStatus()).thenReturn(AccountStatus.ACTIVE);
+        when(account.getCurrency()).thenReturn(transferRequest.currency());
+        when(transferToAccount.getCurrency()).thenReturn(transferRequest.currency());
+        when(account.getId()).thenReturn(1);
+        when(ledgerEntryRepository.computeBalanceForAccount(transferRequest.fromAccountId())).thenReturn(10L);
+
+        assertThatThrownBy(() -> transactionService.transfer(transferRequest)).isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("insufficient funds");
+    }
+
 
     @Test
     void getTransactionById_transactionExists() {

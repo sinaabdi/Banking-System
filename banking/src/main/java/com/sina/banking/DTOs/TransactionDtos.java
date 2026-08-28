@@ -14,6 +14,14 @@ public class TransactionDtos {
             Integer accountId
     ) {}
 
+    public record  TransferRequest (
+            String idempotencyKey,
+            Long amount,
+            String currency,
+            Integer fromAccountId,
+            Integer toAccountId
+    ) {}
+
     public record TransactionResponse(
             Integer id,
             TransactionType transactionType,
