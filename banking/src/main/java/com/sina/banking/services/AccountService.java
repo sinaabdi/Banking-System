@@ -33,9 +33,13 @@ public class AccountService {
 
     @Transactional
     public AccountResponse createAccount(CreateAccountRequest request) {
+        log.debug("Looking up owning user id={} for new account", request.userId());
         User user = userRepository.findById(request.userId()).orElseThrow(() -> new NoSuchElementException("user not found: " + request.userId()));
 
+        // Account number = a DB sequence value with a Luhn check digit appended, so a single
+        // mistyped digit in a manually-entered account number gets caught before any money moves.
         Long accountNumber = generateAccountNumber();
+        log.debug("Generated account number {} for user id={}", accountNumber, user.getId());
 
         Account account = new Account(user, accountNumber, request.type(), request.currency());
 
@@ -67,19 +71,26 @@ public class AccountService {
 
     public long getBalance(Integer accountId) {
         findAccountOrThrow(accountId); // Check if account exists
-        return ledgerEntryRepository.computeBalanceForAccount(accountId);
+        // Balance is never stored directly - it's always the sum of this account's ledger
+        // entries, so it can never drift out of sync with the transaction history that produced it.
+        long balance = ledgerEntryRepository.computeBalanceForAccount(accountId);
+        log.debug("Computed balance for account id={}: {}", accountId, balance);
+        return balance;
     }
 
     public AccountResponse getAccountByAccountId(Integer id) {
+        log.debug("Fetching account id={}", id);
         return AccountResponse.from(findAccountOrThrow(id));
     }
 
     public List<AccountResponse> getAccountsForUser(Integer userId) {
+        log.debug("Fetching accounts for user id={}", userId);
         return accountRepository.findByUserId(userId).stream().
                 map(AccountResponse::from).toList();
     }
 
     public AccountResponse getAccountByAccountNumber(Long accountNumber) {
+        log.debug("Fetching account by account number");
         Account account = accountRepository.findByAccountNumber(accountNumber)
                 .orElseThrow(() -> new NoSuchElementException("account not found: " + accountNumber));
         return AccountResponse.from(account);

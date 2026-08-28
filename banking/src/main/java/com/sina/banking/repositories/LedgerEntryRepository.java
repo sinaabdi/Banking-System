@@ -6,6 +6,9 @@ import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 
 public interface LedgerEntryRepository extends JpaRepository<LedgerEntry, Long> {
+    // Balance is never stored - it's always derived by summing this account's ledger entries,
+    // CREDIT adding and DEBIT subtracting, so it can never drift out of sync with the transaction
+    // history that produced it.
     @Query("""
     select coalesce(sum (
         case when le.direction = com.sina.banking.models.TransactionDirection.CREDIT

@@ -34,6 +34,11 @@ public class TransactionService {
 
     @Transactional
     public TransactionResponse deposit(CreateTransactionRequest request) {
+        log.debug("Deposit requested: idempotencyKey={} accountId={} amount={}",
+                request.idempotencyKey(), request.accountId(), request.amount());
+
+        // Idempotency check must run before anything else - if this key was already processed,
+        // a retried request should get back the original result, not create a second deposit.
         Optional<Transaction> existing = transactionRepository.findByIdempotencyKey(request.idempotencyKey());
         if (existing.isPresent()) {
             log.info("Deposit replay for idempotencyKey={} -> returning existing transaction id={}",
@@ -54,12 +59,16 @@ public class TransactionService {
         // check if currency is correct
         checkCurrencyMatchOrElseThrow(destinationAccount, request);
 
+        // Deposits model money entering the ledger from outside the bank, so the counterpart
+        // to crediting the customer is a debit to the SYSTEM/cash account for that currency,
+        // not a second entry on the same account - every transaction's entries must sum to zero.
         Account cashAccount = accountRepository.findAccountByTypeAndCurrency(AccountType.SYSTEM, request.currency())
                 .orElseThrow(() -> new NoSuchElementException("no system account is defined for this currency: " + request.currency()));
 
         Transaction transaction = new Transaction(TransactionType.DEPOSIT, TransactionStatus.PENDING, request.idempotencyKey());
 
         transaction = transactionRepository.save(transaction);
+        log.debug("Created transaction id={} for deposit", transaction.getId());
 
         LedgerEntry creditEntry = new LedgerEntry(transaction, destinationAccount, TransactionDirection.CREDIT, request.amount(), request.currency());
         LedgerEntry debitEntry = new LedgerEntry(transaction, cashAccount, TransactionDirection.DEBIT, request.amount(), request.currency());
@@ -77,6 +86,9 @@ public class TransactionService {
 
     @Transactional
     public TransactionResponse withdraw(CreateTransactionRequest request) {
+        log.debug("Withdraw requested: idempotencyKey={} accountId={} amount={}",
+                request.idempotencyKey(), request.accountId(), request.amount());
+
         Optional<Transaction> existing = transactionRepository.findByIdempotencyKey(request.idempotencyKey());
         if (existing.isPresent()) {
             log.info("Withdraw replay for idempotencyKey={} -> returning existing transaction id={}",
@@ -88,12 +100,17 @@ public class TransactionService {
             throw new IllegalArgumentException("withdraw amount must be positive");
         }
 
+        // findByIdForUpdate takes a row lock that's held for the rest of this transaction, so a
+        // second concurrent withdrawal on the same account has to wait its turn instead of reading
+        // the same stale balance below and overdrawing the account.
         Account destinationAccount = findAccountForUpdateOrElseThrow(request.accountId());
+        log.debug("Locked account id={} for withdrawal", destinationAccount.getId());
 
         checkAccountActiveOrElseThrow(destinationAccount);
         checkCurrencyMatchOrElseThrow(destinationAccount, request);
 
         Long balance = ledgerEntryRepository.computeBalanceForAccount(destinationAccount.getId());
+        log.debug("Account id={} balance={} requestedAmount={}", destinationAccount.getId(), balance, request.amount());
         if (request.amount() > balance) {
             log.warn("not enough balance for withdraw for account id {} - balance: {}", destinationAccount.getId(), balance);
             throw new IllegalArgumentException("insufficient funds");
@@ -104,7 +121,10 @@ public class TransactionService {
 
         Transaction transaction = new Transaction(TransactionType.WITHDRAWAL, TransactionStatus.PENDING, request.idempotencyKey());
         transaction = transactionRepository.save(transaction);
+        log.debug("Created transaction id={} for withdrawal", transaction.getId());
 
+        // Mirror image of deposit's ledger entries: the customer is debited (loses money),
+        // the system/cash account is credited (cash leaves the bank's reserve).
         LedgerEntry debitEntry = new LedgerEntry(transaction, destinationAccount, TransactionDirection.DEBIT, request.amount(), request.currency());
         LedgerEntry creditEntry = new LedgerEntry(transaction, cashAccount, TransactionDirection.CREDIT, request.amount(), request.currency());
 
@@ -121,6 +141,9 @@ public class TransactionService {
 
     @Transactional
     public TransactionResponse transfer(TransferRequest request) {
+        log.debug("Transfer requested: idempotencyKey={} fromAccountId={} toAccountId={} amount={}",
+                request.idempotencyKey(), request.fromAccountId(), request.toAccountId(), request.amount());
+
         Optional<Transaction> existing = transactionRepository.findByIdempotencyKey(request.idempotencyKey());
         if (existing.isPresent()) {
             log.info("Transfer replay for idempotencyKey={} -> returning existing transaction id={}",
@@ -140,6 +163,10 @@ public class TransactionService {
         Account toAccount;
         Account fromAccount;
 
+        // Two accounts get locked here, so lock ordering matters: always lock the lower account id
+        // first regardless of which side is source/destination. Without this, two transfers between
+        // the same two accounts in opposite directions could each hold one lock while waiting on the
+        // other's - a classic deadlock.
         if (request.toAccountId() <= request.fromAccountId()) {
             toAccount = findAccountForUpdateOrElseThrow(request.toAccountId());
             fromAccount = findAccountForUpdateOrElseThrow(request.fromAccountId());
@@ -147,6 +174,7 @@ public class TransactionService {
             fromAccount = findAccountForUpdateOrElseThrow(request.fromAccountId());
             toAccount = findAccountForUpdateOrElseThrow(request.toAccountId());
         }
+        log.debug("Locked accounts fromId={} toId={} for transfer", fromAccount.getId(), toAccount.getId());
 
         checkAccountActiveOrElseThrow(toAccount);
         checkAccountActiveOrElseThrow(fromAccount);
@@ -154,14 +182,20 @@ public class TransactionService {
         // Currency check on toAccount and fromAccount against request
         checkCurrencyMatchForTransferOrElseThrow(toAccount, fromAccount, request);
 
+        // Only the source account's balance can ever reject a transfer - the destination is only
+        // receiving, so it has no upper bound to check against.
         long balance = ledgerEntryRepository.computeBalanceForAccount(fromAccount.getId());
+        log.debug("Source account id={} balance={} requestedAmount={}", fromAccount.getId(), balance, request.amount());
         if (request.amount() > balance) {
             throw new IllegalArgumentException("insufficient funds");
         }
 
         Transaction transaction = new Transaction(TransactionType.TRANSFER, TransactionStatus.PENDING, request.idempotencyKey());
         transaction = transactionRepository.save(transaction);
+        log.debug("Created transaction id={} for transfer", transaction.getId());
 
+        // No system/cash account here - a transfer only ever moves money between two real
+        // accounts inside the bank's own ledger.
         LedgerEntry debitEntry = new LedgerEntry(transaction, fromAccount, TransactionDirection.DEBIT, request.amount(), request.currency());
         LedgerEntry creditEntry = new LedgerEntry(transaction, toAccount, TransactionDirection.CREDIT, request.amount(), request.currency());
 
@@ -177,10 +211,12 @@ public class TransactionService {
     }
 
     public TransactionResponse getTransactionById(Integer id) {
+        log.debug("Fetching transaction id={}", id);
         return TransactionResponse.from(findTransactionOrThrow(id));
     }
 
     public TransactionResponse getTransactionByIdempotencyKey(String idempotencyKey) {
+        log.debug("Fetching transaction by idempotencyKey={}", idempotencyKey);
         Transaction transaction = transactionRepository.findByIdempotencyKey(idempotencyKey)
                 .orElseThrow(() -> new NoSuchElementException("idempotency key not found: " + idempotencyKey));
         return TransactionResponse.from(transaction);
@@ -204,6 +240,8 @@ public class TransactionService {
         }
     }
 
+    // Both accounts must match the request currency (and therefore each other) - there's no FX
+    // conversion, so a mismatch on either side has to be rejected, not just when both disagree.
     private void checkCurrencyMatchForTransferOrElseThrow(Account to, Account from, TransferRequest request) {
         if (!request.currency().equals(to.getCurrency()) || !request.currency().equals(from.getCurrency())) {
             throw new IllegalArgumentException("currency mismatch, source account currency: " + from.getCurrency() + " , destination account currency: " + to.getCurrency()

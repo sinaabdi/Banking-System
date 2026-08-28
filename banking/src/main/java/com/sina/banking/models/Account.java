@@ -36,6 +36,9 @@ public class Account {
     @Column(name = "status", nullable = false)
     private AccountStatus status;
 
+    // Optimistic lock for direct mutations to this row (freeze/close/activate). Not what protects
+    // withdraw/transfer's balance check, though - those never write to this row directly, so they
+    // rely on a pessimistic row lock instead (see AccountRepository.findByIdForUpdate).
     @Column(name = "version")
     @Version
     private Integer version;

@@ -10,6 +10,11 @@ import org.springframework.web.bind.annotation.RestControllerAdvice;
 
 import java.util.NoSuchElementException;
 
+// Central place that turns thrown exceptions into HTTP responses, so every controller/service
+// can just throw and not worry about status codes. NoSuchElementException -> 404 ("doesn't
+// exist"), IllegalArgumentException -> 400 ("exists but this request is invalid"), anything
+// else -> 500 with a generic message (the real exception is logged server-side, never exposed
+// to the caller).
 @RestControllerAdvice
 public class GlobalExceptionHandler {
 

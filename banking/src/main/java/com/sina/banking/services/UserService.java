@@ -31,6 +31,7 @@ public class UserService {
 
     @Transactional
     public UserResponse createUser(CreateUserRequest request) {
+        log.debug("Checking username/email availability for username={}", request.username());
         if (userRepository.existsByUsername(request.username())) {
             throw new IllegalArgumentException("Username already exists: " + request.username());
         }
@@ -38,6 +39,8 @@ public class UserService {
             throw new IllegalArgumentException("Email already exists: " + request.email());
         }
 
+        // Never store the raw password, only its BCrypt hash - so a database leak alone
+        // doesn't expose anyone's real password.
         String hash = passwordEncoder.encode(request.password());
         User user = new User(request.firstName(), request.lastName(), request.username(), hash, request.email());
 
@@ -48,6 +51,7 @@ public class UserService {
 
     @Transactional
     public UserResponse updateUser(Integer id, UpdateUserRequest request) {
+        log.debug("Updating profile for user id={}", id);
         User user = findUserByIdOrThrow(id);
 
         user.updateUserProfile(request.firstName(), request.lastName(), request.email());
@@ -57,9 +61,13 @@ public class UserService {
 
     @Transactional
     public void changePassword(Integer id, ChangePasswordRequest request) {
+        log.debug("Processing password change for user id={}", id);
         User user = findUserByIdOrThrow(id);
 
-        if(!passwordEncoder.matches(request.currentPassword(), user.getPasswordHash())) {
+        // matches() compares the raw candidate against the stored hash - BCrypt embeds a random
+        // salt, so encoding the same password twice never produces the same hash; you can't just
+        // compare two hashes with equals().
+        if (!passwordEncoder.matches(request.currentPassword(), user.getPasswordHash())) {
             log.warn("Rejected password change for user id={}: current password did not match", id);
             throw new IllegalArgumentException("current password is incorrect");
         }
@@ -83,20 +91,24 @@ public class UserService {
     }
 
     public UserResponse getUserById(Integer id) {
+        log.debug("Fetching user id={}", id);
         User user = findUserByIdOrThrow(id);
         return UserResponse.from(user);
     }
 
     public List<UserResponse> getAllUsers() {
+        log.debug("Fetching all users");
         return userRepository.findAll().stream().map(UserResponse::from).toList();
     }
 
     public UserResponse getUserByEmail(String email) {
+        log.debug("Fetching user by email");
         User user = findUserByEmailOrThrow(email);
         return UserResponse.from(user);
     }
 
     public UserResponse getUserByUsername(String username) {
+        log.debug("Fetching user by username={}", username);
         User user = findUserByUsernameOrThrow(username);
         return UserResponse.from(user);
     }

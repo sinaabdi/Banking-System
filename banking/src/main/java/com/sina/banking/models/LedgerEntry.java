@@ -10,6 +10,9 @@ import org.springframework.data.jpa.domain.support.AuditingEntityListener;
 
 import java.time.LocalDateTime;
 
+// Append-only: no setters and no updatedAt, deliberately. A ledger entry is never edited once
+// written - correcting a mistake means posting a new, opposite entry (a reversal), never mutating
+// this one, so the history always reflects exactly what happened and when.
 @Entity
 @Table(name = "ledger_entries")
 @EntityListeners(AuditingEntityListener.class)
@@ -31,6 +34,8 @@ public class LedgerEntry {
     @Column(name = "direction", nullable = false)
     private TransactionDirection direction;
 
+    // Minor units (e.g. cents), always positive - direction carries the sign. Kept as an integer
+    // rather than a decimal to avoid floating-point rounding entirely.
     @Column(name = "amount", nullable = false)
     private Long amount;
 

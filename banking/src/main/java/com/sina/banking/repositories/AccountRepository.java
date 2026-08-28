@@ -18,9 +18,15 @@ public interface AccountRepository extends JpaRepository<Account, Integer> {
 
     List<Account> findByUserId(Integer userId);
 
+    // A bare sequence has no backing entity, so this has to be a native query rather than
+    // a derived/JPQL one.
     @Query(value = "SELECT NEXTVAL('account_number_seq')", nativeQuery = true)
     Long nextAccountNumberSeed();
 
+    // Acquires a row lock (SELECT ... FOR UPDATE) held for the rest of the caller's transaction.
+    // Use this instead of findById whenever a balance-based decision (withdraw/transfer) is about
+    // to be made for the account - otherwise two concurrent operations could both read the same
+    // stale balance and both proceed.
     @Lock(LockModeType.PESSIMISTIC_WRITE)
     @Query(value = "SELECT a FROM Account a WHERE a.id = :id")
     Optional<Account> findByIdForUpdate(@Param("id") Integer id);

@@ -1,5 +1,8 @@
 package com.sina.banking.utils;
 
+// Appends a Luhn check digit (the same scheme used by credit card numbers) to a raw sequence
+// value, so a single mistyped digit in a manually-entered account number fails validation
+// immediately instead of silently matching a different real account.
 public class AccountNumberGenerator {
     public static Long withCheckDigit(Long seed) {
         String seedString = String.valueOf(seed);
