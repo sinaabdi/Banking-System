@@ -8,6 +8,7 @@ import com.sina.banking.models.User;
 import com.sina.banking.repositories.UserRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -20,10 +21,12 @@ public class UserService {
     private static final Logger log = LoggerFactory.getLogger(UserService.class);
 
     private final UserRepository userRepository;
+    private final PasswordEncoder passwordEncoder;
 
 
-    public UserService(UserRepository userRepository) {
+    public UserService(UserRepository userRepository, PasswordEncoder passwordEncoder) {
         this.userRepository = userRepository;
+        this.passwordEncoder = passwordEncoder;
     }
 
     @Transactional
@@ -35,8 +38,7 @@ public class UserService {
             throw new IllegalArgumentException("Email already exists: " + request.email());
         }
 
-        //TODO: Hash password
-        String hash = request.password();
+        String hash = passwordEncoder.encode(request.password());
         User user = new User(request.firstName(), request.lastName(), request.username(), hash, request.email());
 
         User save = userRepository.save(user);
@@ -57,16 +59,12 @@ public class UserService {
     public void changePassword(Integer id, ChangePasswordRequest request) {
         User user = findUserByIdOrThrow(id);
 
-        //TODO: hash the current and the new password
-        String currentPasswordHashed = request.currentPassword();
-        String newPasswordHashed = request.newPassword();
-
-        if(!user.getPasswordHash().equals(currentPasswordHashed)) {
+        if(!passwordEncoder.matches(request.currentPassword(), user.getPasswordHash())) {
             log.warn("Rejected password change for user id={}: current password did not match", id);
             throw new IllegalArgumentException("current password is incorrect");
         }
 
-        user.changePassword(newPasswordHashed);
+        user.changePassword(passwordEncoder.encode(request.newPassword()));
         log.info("Password changed for user id={}", id);
     }
 

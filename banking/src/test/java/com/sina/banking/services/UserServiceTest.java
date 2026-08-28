@@ -10,6 +10,7 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.InjectMocks;
 import org.mockito.*;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.security.crypto.password.PasswordEncoder;
 
 import java.util.List;
 import java.util.NoSuchElementException;
@@ -25,6 +26,8 @@ public class UserServiceTest {
 
     @Mock
     private UserRepository userRepository;
+    @Mock
+    private PasswordEncoder passwordEncoder;
 
     @InjectMocks
     private UserService userService;
@@ -49,6 +52,7 @@ public class UserServiceTest {
     void createUser_successfullyCreateUser() {
         when(userRepository.existsByUsername(userRequest.username())).thenReturn(false);
         when(userRepository.existsByEmail(userRequest.email())).thenReturn(false);
+        when(passwordEncoder.encode(userRequest.password())).thenReturn("hashed-password");
         when(userRepository.save(any(User.class))).thenAnswer(invocation -> invocation.getArgument(0));
 
         UserResponse response = userService.createUser(userRequest);
@@ -101,14 +105,17 @@ public class UserServiceTest {
 
     @Test
     void changePassword_successfullyChangePassword() {
-        String newPassword = "!@#new_password";
+        String newPassword = "new-password";
+        String newPasswordHashed = "new-passwprd-hashed";
         ChangePasswordRequest passwordRequest = new ChangePasswordRequest(user.getPasswordHash(), newPassword);
 
         when(userRepository.findById(1)).thenReturn(Optional.of(user));
+        when(passwordEncoder.encode(newPassword)).thenReturn(newPasswordHashed);
+        when(passwordEncoder.matches(user.getPasswordHash() ,user.getPasswordHash())).thenReturn(true);
 
         userService.changePassword(1, passwordRequest);
 
-        assertThat(user.getPasswordHash()).isEqualTo(newPassword);
+        assertThat(user.getPasswordHash()).isEqualTo(newPasswordHashed);
 
     }
 
@@ -129,6 +136,7 @@ public class UserServiceTest {
         ChangePasswordRequest passwordRequest = new ChangePasswordRequest(wrongPassword, newPassword);
 
         when(userRepository.findById(1)).thenReturn(Optional.of(user));
+        when(passwordEncoder.matches(wrongPassword, user.getPasswordHash())).thenReturn(false);
 
         assertThatThrownBy(() -> userService.changePassword(1, passwordRequest)).isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("current password is incorrect");
