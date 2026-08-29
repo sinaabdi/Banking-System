@@ -1,7 +1,7 @@
 package com.sina.banking.services;
 
-import com.sina.banking.DTOs.AccountDtos.AccountResponse;
-import com.sina.banking.DTOs.AccountDtos.CreateAccountRequest;
+import com.sina.banking.DTOs.AccountDTOs.AccountResponse;
+import com.sina.banking.DTOs.AccountDTOs.CreateAccountRequest;
 import com.sina.banking.models.Account;
 import com.sina.banking.models.User;
 import com.sina.banking.repositories.AccountRepository;

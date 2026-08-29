@@ -1,6 +1,6 @@
 package com.sina.banking.services;
 
-import com.sina.banking.DTOs.UserDtos.*;
+import com.sina.banking.DTOs.UserDTOs.*;
 import com.sina.banking.models.User;
 import com.sina.banking.models.UserStatus;
 import com.sina.banking.repositories.UserRepository;

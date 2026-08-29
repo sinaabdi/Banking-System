@@ -1,10 +1,14 @@
 package com.sina.banking.controllers;
 
-import com.sina.banking.DTOs.UserDtos.CreateUserRequest;
-import com.sina.banking.DTOs.UserDtos.UpdateUserRequest;
-import com.sina.banking.DTOs.UserDtos.ChangePasswordRequest;
-import com.sina.banking.DTOs.UserDtos.UserResponse;
+import com.sina.banking.DTOs.UserDTOs.CreateUserRequest;
+import com.sina.banking.DTOs.UserDTOs.UpdateUserRequest;
+import com.sina.banking.DTOs.UserDTOs.ChangePasswordRequest;
+import com.sina.banking.DTOs.UserDTOs.UserResponse;
 import com.sina.banking.services.UserService;
+import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.responses.ApiResponse;
+import io.swagger.v3.oas.annotations.responses.ApiResponses;
+import io.swagger.v3.oas.annotations.tags.Tag;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
@@ -14,6 +18,7 @@ import org.springframework.web.bind.annotation.*;
 import java.net.URI;
 import java.util.List;
 
+@Tag(name = "Users")
 @RestController
 @RequestMapping("/api/users")
 public class UserController {
@@ -26,6 +31,11 @@ public class UserController {
         this.userService = userService;
     }
 
+    @Operation(summary = "Register a new user")
+    @ApiResponses({
+            @ApiResponse(responseCode = "201", description = "User created"),
+            @ApiResponse(responseCode = "400", description = "Username or email already exists")
+    })
     @PostMapping
     public ResponseEntity<UserResponse> createUser(@RequestBody CreateUserRequest request) {
         // Never log request.password() here or anywhere downstream - only non-secret fields.
@@ -34,24 +44,42 @@ public class UserController {
         return ResponseEntity.created(URI.create("/api/users/" + userResponse.id())).body(userResponse);
     }
 
+    @Operation(summary = "Get a user by id")
+    @ApiResponses({
+            @ApiResponse(responseCode = "200", description = "User found"),
+            @ApiResponse(responseCode = "404", description = "No user with this id")
+    })
     @GetMapping("/{id}")
     public UserResponse getUserById(@PathVariable Integer id) {
         log.debug("GET /api/users/{}", id);
         return userService.getUserById(id);
     }
 
+    @Operation(summary = "List all users")
+    @ApiResponse(responseCode = "200", description = "List of users (possibly empty)")
     @GetMapping
     public List<UserResponse> getAllUsers() {
         log.debug("GET /api/users");
         return userService.getAllUsers();
     }
 
+    @Operation(summary = "Update a user's profile (first name, last name, email)")
+    @ApiResponses({
+            @ApiResponse(responseCode = "200", description = "Profile updated"),
+            @ApiResponse(responseCode = "404", description = "No user with this id")
+    })
     @PutMapping("/{id}")
     public UserResponse updateUser(@PathVariable Integer id, @RequestBody UpdateUserRequest request) {
         log.debug("PUT /api/users/{}", id);
         return userService.updateUser(id, request);
     }
 
+    @Operation(summary = "Change a user's password, given their current password")
+    @ApiResponses({
+            @ApiResponse(responseCode = "204", description = "Password changed"),
+            @ApiResponse(responseCode = "400", description = "Current password is incorrect"),
+            @ApiResponse(responseCode = "404", description = "No user with this id")
+    })
     @PostMapping("/{id}/change-password")
     @ResponseStatus(HttpStatus.NO_CONTENT)
     public void changePassword(@PathVariable Integer id, @RequestBody ChangePasswordRequest request) {
@@ -60,6 +88,11 @@ public class UserController {
         userService.changePassword(id, request);
     }
 
+    @Operation(summary = "Disable a user, preventing them from signing in")
+    @ApiResponses({
+            @ApiResponse(responseCode = "204", description = "User disabled"),
+            @ApiResponse(responseCode = "404", description = "No user with this id")
+    })
     @PostMapping("/{id}/disable")
     @ResponseStatus(HttpStatus.NO_CONTENT)
     public void disableUser(@PathVariable Integer id) {
@@ -67,6 +100,11 @@ public class UserController {
         userService.disableUser(id);
     }
 
+    @Operation(summary = "Re-enable a previously disabled user")
+    @ApiResponses({
+            @ApiResponse(responseCode = "204", description = "User enabled"),
+            @ApiResponse(responseCode = "404", description = "No user with this id")
+    })
     @PostMapping("/{id}/enable")
     @ResponseStatus(HttpStatus.NO_CONTENT)
     public void enableUser(@PathVariable Integer id) {

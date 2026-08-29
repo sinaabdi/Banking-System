@@ -1,9 +1,9 @@
 package com.sina.banking.services;
 
-import com.sina.banking.DTOs.UserDtos.UpdateUserRequest;
-import com.sina.banking.DTOs.UserDtos.ChangePasswordRequest;
-import com.sina.banking.DTOs.UserDtos.UserResponse;
-import com.sina.banking.DTOs.UserDtos.CreateUserRequest;
+import com.sina.banking.DTOs.UserDTOs.UpdateUserRequest;
+import com.sina.banking.DTOs.UserDTOs.ChangePasswordRequest;
+import com.sina.banking.DTOs.UserDTOs.UserResponse;
+import com.sina.banking.DTOs.UserDTOs.CreateUserRequest;
 import com.sina.banking.models.User;
 import com.sina.banking.repositories.UserRepository;
 import org.slf4j.Logger;

@@ -1,6 +1,6 @@
 package com.sina.banking.services;
 
-import com.sina.banking.DTOs.AccountDtos.*;
+import com.sina.banking.DTOs.AccountDTOs.*;
 import com.sina.banking.models.Account;
 import com.sina.banking.models.AccountStatus;
 import com.sina.banking.models.AccountType;

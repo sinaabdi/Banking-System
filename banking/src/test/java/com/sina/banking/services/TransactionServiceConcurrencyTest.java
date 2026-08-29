@@ -1,11 +1,11 @@
 package com.sina.banking.services;
 
-import com.sina.banking.DTOs.AccountDtos.AccountResponse;
-import com.sina.banking.DTOs.AccountDtos.CreateAccountRequest;
-import com.sina.banking.DTOs.TransactionDtos.TransactionResponse;
-import com.sina.banking.DTOs.TransactionDtos.CreateTransactionRequest;
-import com.sina.banking.DTOs.UserDtos.UserResponse;
-import com.sina.banking.DTOs.UserDtos.CreateUserRequest;
+import com.sina.banking.DTOs.AccountDTOs.AccountResponse;
+import com.sina.banking.DTOs.AccountDTOs.CreateAccountRequest;
+import com.sina.banking.DTOs.TransactionDTOs.TransactionResponse;
+import com.sina.banking.DTOs.TransactionDTOs.CreateTransactionRequest;
+import com.sina.banking.DTOs.UserDTOs.UserResponse;
+import com.sina.banking.DTOs.UserDTOs.CreateUserRequest;
 import com.sina.banking.models.AccountType;
 import com.sina.banking.models.TransactionStatus;
 import org.junit.jupiter.api.BeforeEach;
