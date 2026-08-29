@@ -58,7 +58,7 @@ public class Transaction {
         this.status = TransactionStatus.FAILED;
     }
 
-    public void revesedTransaction() {
+    public void markStatusReversed() {
         this.status = TransactionStatus.REVERSED;
     }
 
@@ -70,7 +70,7 @@ public class Transaction {
         this.type = TransactionType.DEPOSIT;
     }
 
-    public void withdrawlTransaction() {
+    public void withdrawalTransaction() {
         this.type = TransactionType.WITHDRAWAL;
     }
 
@@ -78,7 +78,7 @@ public class Transaction {
         this.type = TransactionType.FEE;
     }
 
-    public void reversalTransaction() {
+    public void markTypeReversal() {
         this.type = TransactionType.REVERSAL;
     }
 }

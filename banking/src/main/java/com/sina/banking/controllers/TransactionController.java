@@ -1,5 +1,6 @@
 package com.sina.banking.controllers;
 
+import com.sina.banking.DTOs.TransactionDtos.ReverseTransactionRequest;
 import com.sina.banking.DTOs.TransactionDtos.TransferRequest;
 import com.sina.banking.DTOs.TransactionDtos.CreateTransactionRequest;
 import com.sina.banking.DTOs.TransactionDtos.TransactionResponse;
@@ -43,6 +44,13 @@ public class TransactionController {
                 request.fromAccountId(), request.toAccountId(), request.amount());
         TransactionResponse response = transactionService.transfer(request);
         return ResponseEntity.created(URI.create("/api/transactions/transfer/" + response.id())).body(response);
+    }
+
+    @PostMapping("/reverse")
+    public ResponseEntity<TransactionResponse> reverse(@RequestBody ReverseTransactionRequest request) {
+        log.debug("POST /api/transaction/reverse transaction id={}", request.transactionId());
+        TransactionResponse response = transactionService.reverse(request);
+        return ResponseEntity.created(URI.create("/api/transactions/reverse/" + response.id())).body(response);
     }
 
     @GetMapping("/{id}")

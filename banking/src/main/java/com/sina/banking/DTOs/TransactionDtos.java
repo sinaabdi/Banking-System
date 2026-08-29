@@ -41,4 +41,9 @@ public class TransactionDtos {
             );
         }
     }
+
+    public record ReverseTransactionRequest(
+            String idempotencyKey,
+            Integer transactionId
+    ) {}
 }

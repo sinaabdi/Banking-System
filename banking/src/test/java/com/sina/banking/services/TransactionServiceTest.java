@@ -1,5 +1,6 @@
 package com.sina.banking.services;
 
+import com.sina.banking.DTOs.TransactionDtos.ReverseTransactionRequest;
 import com.sina.banking.DTOs.TransactionDtos.TransferRequest;
 import com.sina.banking.DTOs.TransactionDtos.TransactionResponse;
 import com.sina.banking.DTOs.TransactionDtos.CreateTransactionRequest;
@@ -15,6 +16,7 @@ import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.NoSuchElementException;
 import java.util.Optional;
@@ -40,6 +42,7 @@ public class TransactionServiceTest {
     private Account transferToAccount;
     private CreateTransactionRequest request;
     private TransferRequest transferRequest;
+    private ReverseTransactionRequest reverseRequest;
 
     @BeforeEach
     void setup(){
@@ -57,6 +60,10 @@ public class TransactionServiceTest {
                 "USD",
                 1,
                 10
+        );
+        reverseRequest = new ReverseTransactionRequest(
+                "idem-key-123",
+                1
         );
     }
 
@@ -123,7 +130,7 @@ public class TransactionServiceTest {
         when(accountRepository.findById(request.accountId())).thenReturn(Optional.empty());
 
         assertThatThrownBy(() -> transactionService.deposit(request)).isInstanceOf(NoSuchElementException.class)
-                .hasMessageContaining("account does not exists");
+                .hasMessageContaining("account does not exist");
     }
 
     @Test
@@ -241,7 +248,7 @@ public class TransactionServiceTest {
         when(accountRepository.findByIdForUpdate(request.accountId())).thenReturn(Optional.empty());
 
         assertThatThrownBy(() -> transactionService.withdraw(request)).isInstanceOf(NoSuchElementException.class)
-                .hasMessageContaining("account does not exists");
+                .hasMessageContaining("account does not exist");
     }
 
 
@@ -376,7 +383,7 @@ public class TransactionServiceTest {
         when(accountRepository.findByIdForUpdate(transferRequest.fromAccountId())).thenReturn(Optional.empty());
 
         assertThatThrownBy(() -> transactionService.transfer(transferRequest)).isInstanceOf(NoSuchElementException.class)
-                .hasMessageContaining("account does not exists");
+                .hasMessageContaining("account does not exist");
     }
 
     @Test
@@ -386,7 +393,7 @@ public class TransactionServiceTest {
         when(accountRepository.findByIdForUpdate(transferRequest.toAccountId())).thenReturn(Optional.empty());
 
         assertThatThrownBy(() -> transactionService.transfer(transferRequest)).isInstanceOf(NoSuchElementException.class)
-                .hasMessageContaining("account does not exists");
+                .hasMessageContaining("account does not exist");
     }
 
     @Test
@@ -476,6 +483,95 @@ public class TransactionServiceTest {
 
         assertThatThrownBy(() -> transactionService.transfer(transferRequest)).isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("insufficient funds");
+    }
+
+    @Test
+    void reverse_happyPath_postedTransactionAndCreateLedgerEntryForAllEntriesWithFlipDirection() {
+        Transaction transaction = new Transaction(TransactionType.DEPOSIT, TransactionStatus.POSTED, "test-idem-123");
+        transaction.setId(reverseRequest.transactionId());
+        LedgerEntry creditEntry = new LedgerEntry(transaction, account, TransactionDirection.CREDIT, 100L, "USD");
+        LedgerEntry debitEntry = new LedgerEntry(transaction, systemAccount, TransactionDirection.DEBIT, 100L, "USD");
+        List<LedgerEntry> ledgerEntries = new ArrayList<>(List.of(creditEntry, debitEntry));
+
+        when(transactionRepository.findByIdempotencyKey(reverseRequest.idempotencyKey())).thenReturn(Optional.empty());
+        when(transactionRepository.findById(reverseRequest.transactionId())).thenReturn(Optional.of(transaction));
+        when(ledgerEntryRepository.findByTransactionId(transaction.getId())).thenReturn(ledgerEntries);
+
+
+        Transaction savedTransaction = new Transaction(TransactionType.REVERSAL, TransactionStatus.PENDING, reverseRequest.idempotencyKey());
+        when(transactionRepository.save(any(Transaction.class))).thenReturn(savedTransaction);
+
+        TransactionResponse response = transactionService.reverse(reverseRequest);
+
+        assertThat(response).isNotNull();
+        assertThat(response.transactionStatus()).isEqualTo(TransactionStatus.POSTED);
+        assertThat(response.transactionType()).isEqualTo(TransactionType.REVERSAL);
+
+        ArgumentCaptor<LedgerEntry> captor = ArgumentCaptor.forClass(LedgerEntry.class);
+        verify(ledgerEntryRepository, times(ledgerEntries.size())).save(captor.capture());
+        List<LedgerEntry> entries = captor.getAllValues();
+
+        LedgerEntry flippedCredit = entries.stream().filter(e -> e.getAccount() == account).findFirst().orElseThrow();
+        LedgerEntry flippedDebit = entries.stream().filter(e -> e.getAccount() == systemAccount).findFirst().orElseThrow();
+
+        assertThat(flippedCredit.getDirection()).isEqualTo(TransactionDirection.DEBIT);
+        assertThat(flippedDebit.getDirection()).isEqualTo(TransactionDirection.CREDIT);
+        assertThat(transaction.getStatus()).isEqualTo(TransactionStatus.REVERSED);
+
+    }
+
+    @Test
+    void reverse_idempotencyKeyAlreadyExists() {
+        Transaction existingTransaction = new Transaction(TransactionType.REVERSAL, TransactionStatus.PENDING, reverseRequest.idempotencyKey());
+        when(transactionRepository.findByIdempotencyKey(reverseRequest.idempotencyKey())).thenReturn(Optional.of(existingTransaction));
+
+        TransactionResponse response = transactionService.reverse(reverseRequest);
+
+        assertThat(response).isNotNull();
+        assertThat(response.idempotencyKey()).isEqualTo(reverseRequest.idempotencyKey());
+        assertThat(response.transactionStatus()).isEqualTo(existingTransaction.getStatus());
+
+        verify(transactionRepository, never()).save(any());
+        verifyNoInteractions(ledgerEntryRepository);
+    }
+
+    @Test
+    void reverse_transactionDoesNotExists() {
+        when(transactionRepository.findByIdempotencyKey(reverseRequest.idempotencyKey())).thenReturn(Optional.empty());
+        when(transactionRepository.findById(reverseRequest.transactionId())).thenReturn(Optional.empty());
+
+        assertThatThrownBy(() -> transactionService.reverse(reverseRequest)).isInstanceOf(NoSuchElementException.class)
+                .hasMessageContaining("transaction does not exist");
+    }
+
+    @Test
+    void reverse_transactionTypeIsReversal() {
+        Transaction transaction = new Transaction(TransactionType.REVERSAL, TransactionStatus.POSTED, "test-idem-123");
+        when(transactionRepository.findByIdempotencyKey(reverseRequest.idempotencyKey())).thenReturn(Optional.empty());
+        when(transactionRepository.findById(reverseRequest.transactionId())).thenReturn(Optional.of(transaction));
+
+        assertThatThrownBy(() -> transactionService.reverse(reverseRequest)).isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("it is a reversal transaction");
+    }
+
+    @Test
+    void reverse_transactionAlreadyReversed() {
+        Transaction transaction = new Transaction(TransactionType.DEPOSIT, TransactionStatus.REVERSED, "test-idem-123");
+        when(transactionRepository.findByIdempotencyKey(reverseRequest.idempotencyKey())).thenReturn(Optional.empty());
+        when(transactionRepository.findById(reverseRequest.transactionId())).thenReturn(Optional.of(transaction));
+
+        assertThatThrownBy(() -> transactionService.reverse(reverseRequest)).isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("already reversed");
+    }
+
+    @Test
+    void reverse_transactionIsNotInPostedStatus() {
+        Transaction transaction = new Transaction(TransactionType.DEPOSIT, TransactionStatus.FAILED, "test-idem-123");
+        when(transactionRepository.findByIdempotencyKey(reverseRequest.idempotencyKey())).thenReturn(Optional.empty());
+        when(transactionRepository.findById(reverseRequest.transactionId())).thenReturn(Optional.of(transaction));
+
+        assertThatThrownBy(() -> transactionService.reverse(reverseRequest)).isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("is not in POSTED status");
     }
 
 

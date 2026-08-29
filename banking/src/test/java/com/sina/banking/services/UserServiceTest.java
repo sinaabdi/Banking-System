@@ -100,7 +100,7 @@ public class UserServiceTest {
         when(userRepository.findById(1)).thenReturn(Optional.empty());
 
         assertThatThrownBy(() -> userService.updateUser(1, updateUserRequest)).isInstanceOf(NoSuchElementException.class)
-                .hasMessageContaining("User not found");
+                .hasMessageContaining("user not found");
     }
 
     @Test
@@ -126,7 +126,7 @@ public class UserServiceTest {
         when(userRepository.findById(1)).thenReturn(Optional.empty());
 
         assertThatThrownBy(() -> userService.changePassword(1, passwordRequest)).isInstanceOf(NoSuchElementException.class)
-                .hasMessageContaining("User not found");
+                .hasMessageContaining("user not found");
     }
 
     @Test
@@ -156,7 +156,7 @@ public class UserServiceTest {
         when(userRepository.findById(1)).thenReturn(Optional.empty());
 
         assertThatThrownBy(() -> userService.disableUser(1)).isInstanceOf(NoSuchElementException.class)
-                .hasMessageContaining("User not found");
+                .hasMessageContaining("user not found");
     }
 
     @Test
@@ -173,7 +173,7 @@ public class UserServiceTest {
         when(userRepository.findById(1)).thenReturn(Optional.empty());
 
         assertThatThrownBy(() -> userService.enableUser(1)).isInstanceOf(NoSuchElementException.class)
-                .hasMessageContaining("User not found");
+                .hasMessageContaining("user not found");
     }
 
     @Test
@@ -193,7 +193,7 @@ public class UserServiceTest {
         when(userRepository.findById(1)).thenReturn(Optional.empty());
 
         assertThatThrownBy(() -> userService.getUserById(1)).isInstanceOf(NoSuchElementException.class)
-                .hasMessageContaining("User not found");
+                .hasMessageContaining("user not found");
     }
 
     @SuppressWarnings("null")
@@ -227,7 +227,7 @@ public class UserServiceTest {
         when(userRepository.findByEmail(userRequest.email())).thenReturn(Optional.empty());
 
         assertThatThrownBy(() -> userService.getUserByEmail(userRequest.email())).isInstanceOf(NoSuchElementException.class)
-                .hasMessageContaining("User not found");
+                .hasMessageContaining("user not found");
     }
 
     @Test
@@ -247,6 +247,6 @@ public class UserServiceTest {
         when(userRepository.findByUsername(userRequest.username())).thenReturn(Optional.empty());
 
         assertThatThrownBy(() -> userService.getUserByUsername(userRequest.username())).isInstanceOf(NoSuchElementException.class)
-                .hasMessageContaining("User not found");
+                .hasMessageContaining("user not found");
     }
 }

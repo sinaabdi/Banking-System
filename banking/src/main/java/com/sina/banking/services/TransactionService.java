@@ -1,5 +1,6 @@
 package com.sina.banking.services;
 
+import com.sina.banking.DTOs.TransactionDtos.ReverseTransactionRequest;
 import com.sina.banking.DTOs.TransactionDtos.TransferRequest;
 import com.sina.banking.DTOs.TransactionDtos.TransactionResponse;
 import com.sina.banking.DTOs.TransactionDtos.CreateTransactionRequest;
@@ -12,6 +13,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.util.List;
 import java.util.NoSuchElementException;
 import java.util.Optional;
 
@@ -47,12 +49,12 @@ public class TransactionService {
         }
 
         if (request.amount() <= 0) {
-            throw new IllegalArgumentException("deposit amount must be positive.");
+            throw new IllegalArgumentException("deposit amount must be positive");
         }
 
         // fetch account
         Account destinationAccount = accountRepository.findById(request.accountId())
-                .orElseThrow(() -> new NoSuchElementException("account does not exists: " + request.accountId()));
+                .orElseThrow(() -> new NoSuchElementException("account does not exist:" + request.accountId()));
 
         // check account status
         checkAccountActiveOrElseThrow(destinationAccount);
@@ -157,7 +159,7 @@ public class TransactionService {
 
         // Reject transfer an account to itself
         if (request.toAccountId().equals(request.fromAccountId())) {
-            throw new IllegalArgumentException("cannot transfer to the same account.");
+            throw new IllegalArgumentException("cannot transfer to the same account");
         }
 
         Account toAccount;
@@ -210,6 +212,72 @@ public class TransactionService {
         return TransactionResponse.from(transaction);
     }
 
+    @Transactional
+    public TransactionResponse reverse(ReverseTransactionRequest request) {
+        log.debug("Reverse requested: idempotencyKey={} transactionId={}", request.idempotencyKey(), request.transactionId());
+
+        Optional<Transaction> existing = transactionRepository.findByIdempotencyKey(request.idempotencyKey());
+        if (existing.isPresent()) {
+            log.info("Reverse replay for idempotencyKey={} -> returning existing transaction id={}",
+                    request.idempotencyKey(), existing.get().getId());
+            return TransactionResponse.from(existing.get());
+        }
+
+        Transaction transaction = transactionRepository.findById(request.transactionId())
+                .orElseThrow(() -> new NoSuchElementException("transaction does not exist:" + request.transactionId()));
+
+        // A reversal is a terminal correction, not something itself correctable through the same
+        // mechanism - otherwise the reversal chain (A <- B <- C <- ...) could grow without bound,
+        // and "what actually happened to this money" would mean walking an arbitrarily long chain
+        // instead of a single hop. Redoing the original action means posting a fresh transaction,
+        // not reversing the reversal.
+        if (transaction.getType().equals(TransactionType.REVERSAL)) {
+            log.warn("transaction {} is a REVERSAL, cannot reverse a reversal transaction", transaction.getId());
+            throw new IllegalArgumentException("cannot reverse transaction: " + transaction.getId() + ", it is a reversal transaction");
+        }
+
+        // Only a transaction that's currently POSTED and hasn't already been reversed is eligible -
+        // PENDING/FAILED never took effect, and a transaction can be reversed at most once.
+        if (transaction.getStatus().equals(TransactionStatus.REVERSED)) {
+            log.warn("transaction {} already reversed", transaction.getId());
+            throw new IllegalArgumentException("cannot reverse transaction: " + transaction.getId() + ", already reversed");
+        }
+
+        if (!transaction.getStatus().equals(TransactionStatus.POSTED)) {
+            log.warn("transaction {} is not in POSTED status, cannot reverse it. transaction status: {}", transaction.getId(), transaction.getStatus());
+            throw new IllegalArgumentException("cannot reverse transaction: " + transaction.getId() + ", is not in POSTED status");
+        }
+
+        List<LedgerEntry> ledgerEntries = ledgerEntryRepository.findByTransactionId(transaction.getId());
+        log.debug("Found {} ledger entries to reverse for transaction id={}", ledgerEntries.size(), transaction.getId());
+
+        Transaction reverseTransaction = new Transaction(TransactionType.REVERSAL, TransactionStatus.PENDING, request.idempotencyKey());
+        reverseTransaction.setReversedTransactionId(transaction.getId()); // points back at the transaction this one reverses
+        reverseTransaction = transactionRepository.save(reverseTransaction);
+        log.debug("Created transaction id={} for reversal", reverseTransaction.getId());
+
+        // Mirror every original entry onto the new transaction with direction flipped, so the
+        // original and its reversal sum to zero once both exist. The original entries themselves
+        // are never touched - the ledger is append-only.
+        for (LedgerEntry entry: ledgerEntries) {
+            TransactionDirection direction = TransactionDirection.CREDIT;
+            if (entry.getDirection().equals(direction)) {
+                direction = TransactionDirection.DEBIT;
+            }
+
+            LedgerEntry ledgerEntry = new LedgerEntry(reverseTransaction, entry.getAccount(), direction, entry.getAmount(), entry.getCurrency());
+            ledgerEntryRepository.save(ledgerEntry);
+        }
+
+        reverseTransaction.postedTransaction();
+        transaction.markStatusReversed();
+
+        log.info("Posted reverse transaction id={} originalTransactionId={} entriesReversed={}",
+                reverseTransaction.getId(), transaction.getId(), ledgerEntries.size());
+
+        return TransactionResponse.from(reverseTransaction);
+    }
+
     public TransactionResponse getTransactionById(Integer id) {
         log.debug("Fetching transaction id={}", id);
         return TransactionResponse.from(findTransactionOrThrow(id));
@@ -244,13 +312,13 @@ public class TransactionService {
     // conversion, so a mismatch on either side has to be rejected, not just when both disagree.
     private void checkCurrencyMatchForTransferOrElseThrow(Account to, Account from, TransferRequest request) {
         if (!request.currency().equals(to.getCurrency()) || !request.currency().equals(from.getCurrency())) {
-            throw new IllegalArgumentException("currency mismatch, source account currency: " + from.getCurrency() + " , destination account currency: " + to.getCurrency()
-            + " , request currency: " + request.currency());
+            throw new IllegalArgumentException("currency mismatch, source account currency: " + from.getCurrency() + ", destination account currency: " + to.getCurrency()
+            + ", request currency: " + request.currency());
         }
     }
 
     private Account findAccountForUpdateOrElseThrow(Integer id) {
         return accountRepository.findByIdForUpdate(id)
-                .orElseThrow(() -> new NoSuchElementException("account does not exists: " + id));
+                .orElseThrow(() -> new NoSuchElementException("account does not exist:" + id));
     }
 }

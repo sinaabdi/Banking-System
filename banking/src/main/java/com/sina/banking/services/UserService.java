@@ -114,15 +114,15 @@ public class UserService {
     }
 
     private User findUserByIdOrThrow(Integer id) {
-        return userRepository.findById(id).orElseThrow( () -> new NoSuchElementException("User not found: " + id));
+        return userRepository.findById(id).orElseThrow( () -> new NoSuchElementException("user not found: " + id));
     }
 
     private User findUserByEmailOrThrow(String email) {
-        return userRepository.findByEmail(email).orElseThrow( () -> new NoSuchElementException("User not found: " + email));
+        return userRepository.findByEmail(email).orElseThrow( () -> new NoSuchElementException("user not found: " + email));
     }
 
     private User findUserByUsernameOrThrow(String username) {
-        return userRepository.findByUsername(username).orElseThrow( () -> new NoSuchElementException("User not found: " + username));
+        return userRepository.findByUsername(username).orElseThrow( () -> new NoSuchElementException("user not found: " + username));
     }
 
 }
