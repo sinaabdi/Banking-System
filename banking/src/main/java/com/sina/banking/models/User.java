@@ -54,6 +54,10 @@ public class User {
     @LastModifiedDate
     private LocalDateTime updatedAt;
 
+    @Enumerated(EnumType.STRING)
+    @Column(name = "role", nullable = false)
+    private UserRole role;
+
 
     public User() {}
 
@@ -64,6 +68,7 @@ public class User {
         this.passwordHash = passwordHash;
         this.email = email;
         this.status = UserStatus.ACTIVE;
+        this.role = UserRole.USER;
     }
 
     public void updateUserProfile(String firstName, String lastName, String email) {
@@ -82,5 +87,13 @@ public class User {
 
     public void enable() {
         this.status = UserStatus.ACTIVE;
+    }
+
+    public void changeUserRoleToUser() {
+        this.role = UserRole.USER;
+    }
+
+    public void changeUserRoleToAdmin() {
+        this.role = UserRole.ADMIN;
     }
 }
