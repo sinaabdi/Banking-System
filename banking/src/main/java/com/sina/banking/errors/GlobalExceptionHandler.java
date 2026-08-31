@@ -5,6 +5,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ProblemDetail;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.access.AccessDeniedException;
 import org.springframework.security.core.AuthenticationException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
@@ -15,8 +16,10 @@ import java.util.NoSuchElementException;
 // can just throw and not worry about status codes. NoSuchElementException -> 404 ("doesn't
 // exist"), IllegalArgumentException -> 400 ("exists but this request is invalid"),
 // AuthenticationException -> 401 ("wrong credentials, unknown username, or disabled account" -
-// see AuthenticationService/AppUserDetailsService), anything else -> 500 with a generic message
-// (the real exception is logged server-side, never exposed to the caller).
+// see AuthenticationService/AppUserDetailsService), AccessDeniedException -> 403 ("I know who
+// you are, but you're not allowed to do this" - e.g. a @PreAuthorize ownership/role check
+// failing on a valid, logged-in caller), anything else -> 500 with a generic message (the real
+// exception is logged server-side, never exposed to the caller).
 @RestControllerAdvice
 public class GlobalExceptionHandler {
 
@@ -34,10 +37,16 @@ public class GlobalExceptionHandler {
         return build(HttpStatus.BAD_REQUEST, ex.getMessage());
     }
 
-    @ExceptionHandler
+    @ExceptionHandler(AuthenticationException.class)
     public ResponseEntity<ProblemDetail> handleAuthFailed(AuthenticationException ex) {
         log.warn("Authentication failed: {}", ex.getMessage());
         return build(HttpStatus.UNAUTHORIZED, ex.getMessage());
+    }
+
+    @ExceptionHandler(AccessDeniedException.class)
+    public ResponseEntity<ProblemDetail> handleAccessDenied(AccessDeniedException ex) {
+        log.warn("Access denied: {}", ex.getMessage());
+        return build(HttpStatus.FORBIDDEN, ex.getMessage());
     }
 
     @ExceptionHandler(Exception.class)

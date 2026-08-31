@@ -14,6 +14,8 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.security.access.AccessDeniedException;
+import org.springframework.test.util.ReflectionTestUtils;
 
 import java.util.List;
 import java.util.NoSuchElementException;
@@ -27,6 +29,11 @@ import static org.mockito.Mockito.when;
 
 @ExtendWith(MockitoExtension.class)
 public class AccountServiceTest {
+    
+    private final Long ACCOUNT_NUMBER = 123L;
+    private final Integer CALLER_ID = 1;
+    private final Integer WRONG_CALLER_ID = 2;
+    private final Integer ACCOUNT_ID = 1;
 
     @Mock
     private AccountRepository accountRepository;
@@ -75,47 +82,47 @@ public class AccountServiceTest {
     void freezeAccount_successfullyFreezeAccount() {
         Account account = getMockAccount();
 
-        when(accountRepository.findById(1)).thenReturn(Optional.of(account));
-        accountService.freezeAccount(1);
+        when(accountRepository.findById(ACCOUNT_ID)).thenReturn(Optional.of(account));
+        accountService.freezeAccount(ACCOUNT_ID);
 
         assertThat(account.getStatus()).isEqualTo(AccountStatus.FROZEN);
     }
 
     @Test
     void freezeAccount_accountNotFound() {
-        when(accountRepository.findById(1)).thenReturn(Optional.empty());
+        when(accountRepository.findById(ACCOUNT_ID)).thenReturn(Optional.empty());
 
-        assertThatThrownBy(() -> accountService.freezeAccount(1)).isInstanceOf(NoSuchElementException.class)
+        assertThatThrownBy(() -> accountService.freezeAccount(ACCOUNT_ID)).isInstanceOf(NoSuchElementException.class)
                 .hasMessageContaining("account not found");
     }
 
     @Test
     void closeAccount_successfullyCloseAccount() {
         Account account = getMockAccount();
-        when(accountRepository.findById(1)).thenReturn(Optional.of(account));
-        accountService.closeAccount(1);
+        when(accountRepository.findById(ACCOUNT_ID)).thenReturn(Optional.of(account));
+        accountService.closeAccount(ACCOUNT_ID);
         assertThat(account.getStatus()).isEqualTo(AccountStatus.CLOSED);
     }
 
     @Test
     void closeAccount_accountNotFound() {
-        when(accountRepository.findById(1)).thenReturn(Optional.empty());
+        when(accountRepository.findById(ACCOUNT_ID)).thenReturn(Optional.empty());
 
-        assertThatThrownBy(() -> accountService.closeAccount(1)).isInstanceOf(NoSuchElementException.class)
+        assertThatThrownBy(() -> accountService.closeAccount(ACCOUNT_ID)).isInstanceOf(NoSuchElementException.class)
                 .hasMessageContaining("account not found");
     }
 
     @Test
     void activeAccount_successfullyActiveAccount() {
         Account account = getMockAccount();
-        when(accountRepository.findById(1)).thenReturn(Optional.of(account));
-        accountService.activeAccount(1);
+        when(accountRepository.findById(ACCOUNT_ID)).thenReturn(Optional.of(account));
+        accountService.activeAccount(ACCOUNT_ID);
         assertThat(account.getStatus()).isEqualTo(AccountStatus.ACTIVE);
     }
 
     @Test
     void activeAccount_accountNotFound() {
-        when(accountRepository.findById(1)).thenReturn(Optional.empty());
+        when(accountRepository.findById(ACCOUNT_ID)).thenReturn(Optional.empty());
 
         assertThatThrownBy(() -> accountService.activeAccount(1)).isInstanceOf(NoSuchElementException.class)
                 .hasMessageContaining("account not found");
@@ -124,8 +131,28 @@ public class AccountServiceTest {
     @Test
     void getAccountByAccountId_successfullyGetAccount() {
         Account account = getMockAccount();
-        when(accountRepository.findById(1)).thenReturn(Optional.of(account));
-        AccountResponse response = accountService.getAccountByAccountId(1);
+        when(accountRepository.findById(ACCOUNT_ID)).thenReturn(Optional.of(account));
+        AccountResponse response = accountService.getAccountByAccountId(ACCOUNT_ID, CALLER_ID, false);
+
+        assertThat(response).isNotNull();
+        assertThat(response.status()).isEqualTo(account.getStatus());
+        assertThat(response.userId()).isEqualTo(account.getUser().getId());
+    }
+
+    @Test
+    void getAccountByAccountId_callerDoesNotOwnAccount() {
+        Account account = getMockAccount();
+        when(accountRepository.findById(ACCOUNT_ID)).thenReturn(Optional.of(account));
+
+        assertThatThrownBy( () -> accountService.getAccountByAccountId(ACCOUNT_ID, WRONG_CALLER_ID, false))
+                .isInstanceOf(AccessDeniedException.class).hasMessageContaining("does not belong to caller");
+    }
+
+    @Test
+    void getAccountByAccountId_callerGetAccountWithAdminRole() {
+        Account account = getMockAccount();
+        when(accountRepository.findById(ACCOUNT_ID)).thenReturn(Optional.of(account));
+        AccountResponse response = accountService.getAccountByAccountId(ACCOUNT_ID, WRONG_CALLER_ID, true);
 
         assertThat(response).isNotNull();
         assertThat(response.status()).isEqualTo(account.getStatus());
@@ -136,7 +163,7 @@ public class AccountServiceTest {
     void getAccountByAccountId_accountNotFound() {
         when(accountRepository.findById(1)).thenReturn(Optional.empty());
 
-        assertThatThrownBy(() -> accountService.getAccountByAccountId(1)).isInstanceOf(NoSuchElementException.class)
+        assertThatThrownBy(() -> accountService.getAccountByAccountId(ACCOUNT_ID, CALLER_ID, false)).isInstanceOf(NoSuchElementException.class)
                 .hasMessageContaining("account not found");
     }
 
@@ -160,9 +187,32 @@ public class AccountServiceTest {
     @Test
     void getAccountByAccountNumber_successfullyGetAccount() {
         Account account = getMockAccount();
-        when(accountRepository.findByAccountNumber(123L)).thenReturn(Optional.of(account));
+        when(accountRepository.findByAccountNumber(ACCOUNT_NUMBER)).thenReturn(Optional.of(account));
 
-        AccountResponse response = accountService.getAccountByAccountNumber(123L);
+        AccountResponse response = accountService.getAccountByAccountNumber(ACCOUNT_NUMBER, CALLER_ID, false);
+
+        assertThat(response).isNotNull();
+        assertThat(response.accountNumber()).isEqualTo(account.getAccountNumber());
+        assertThat(response.currency()).isEqualTo(account.getCurrency());
+        assertThat(response.userId()).isEqualTo(account.getUser().getId());
+    }
+    
+    @Test
+    void getAccountByAccountNumber_callerDoesNotOwnAccount() {
+        Account account = getMockAccount();
+        when(accountRepository.findByAccountNumber(ACCOUNT_NUMBER)).thenReturn(Optional.of(account));
+
+        assertThatThrownBy( () -> accountService.getAccountByAccountNumber(ACCOUNT_NUMBER, WRONG_CALLER_ID, false))
+                .isInstanceOf(AccessDeniedException.class).hasMessageContaining("does not belong to caller");
+    }
+
+
+    @Test
+    void getAccountByAccountNumber_callerGetAccountWithAdminRole() {
+        Account account = getMockAccount();
+        when(accountRepository.findByAccountNumber(ACCOUNT_NUMBER)).thenReturn(Optional.of(account));
+
+        AccountResponse response = accountService.getAccountByAccountNumber(ACCOUNT_NUMBER, WRONG_CALLER_ID, true);
 
         assertThat(response).isNotNull();
         assertThat(response.accountNumber()).isEqualTo(account.getAccountNumber());
@@ -172,17 +222,17 @@ public class AccountServiceTest {
 
     @Test
     void getAccountByAccountNumber_accountNotFound() {
-        when(accountRepository.findByAccountNumber(123L)).thenReturn(Optional.empty());
+        when(accountRepository.findByAccountNumber(ACCOUNT_NUMBER)).thenReturn(Optional.empty());
 
-        assertThatThrownBy(() -> accountService.getAccountByAccountNumber(123L)).isInstanceOf(NoSuchElementException.class)
+        assertThatThrownBy(() -> accountService.getAccountByAccountNumber(ACCOUNT_NUMBER, CALLER_ID, false)).isInstanceOf(NoSuchElementException.class)
                 .hasMessageContaining("account not found");
     }
 
     @Test
     void getBalance_accountNotFound() {
-        when(accountRepository.findById(1)).thenReturn(Optional.empty());
+        when(accountRepository.findById(ACCOUNT_ID)).thenReturn(Optional.empty());
 
-        assertThatThrownBy(() -> accountService.getBalance(1)).isInstanceOf(NoSuchElementException.class)
+        assertThatThrownBy(() -> accountService.getBalance(ACCOUNT_ID)).isInstanceOf(NoSuchElementException.class)
                 .hasMessageContaining("account not found");
 
         verifyNoInteractions(ledgerEntryRepository);
@@ -192,9 +242,9 @@ public class AccountServiceTest {
     void getBalance_successfullyGetBalance() {
         Account account = getMockAccount();
         when(accountRepository.findById(1)).thenReturn(Optional.of(account));
-        when(ledgerEntryRepository.computeBalanceForAccount(1)).thenReturn(100L);
+        when(ledgerEntryRepository.computeBalanceForAccount(ACCOUNT_ID)).thenReturn(100L);
 
-        Long balance = accountService.getBalance(1);
+        Long balance = accountService.getBalance(ACCOUNT_ID);
 
         assertThat(balance).isNotNull();
         assertThat(balance).isEqualTo(100L);
@@ -202,6 +252,7 @@ public class AccountServiceTest {
 
     private Account getMockAccount() {
         User user = new User("John", "Doe", "testUser", "@#$%123", "testuser@bank.local");
+        ReflectionTestUtils.setField(user, "id", 1);
         return new Account(user, 100000L, AccountType.CHECKING, "USD");
     }
 }

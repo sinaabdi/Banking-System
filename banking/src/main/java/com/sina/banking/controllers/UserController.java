@@ -13,6 +13,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.*;
 
 import java.net.URI;
@@ -49,6 +50,7 @@ public class UserController {
             @ApiResponse(responseCode = "200", description = "User found"),
             @ApiResponse(responseCode = "404", description = "No user with this id")
     })
+    @PreAuthorize("#id == authentication.principal.id or hasRole('ADMIN')")
     @GetMapping("/{id}")
     public UserResponse getUserById(@PathVariable Integer id) {
         log.debug("GET /api/users/{}", id);
@@ -57,6 +59,7 @@ public class UserController {
 
     @Operation(summary = "List all users")
     @ApiResponse(responseCode = "200", description = "List of users (possibly empty)")
+    @PreAuthorize("hasRole('ADMIN')")
     @GetMapping
     public List<UserResponse> getAllUsers() {
         log.debug("GET /api/users");
@@ -68,6 +71,7 @@ public class UserController {
             @ApiResponse(responseCode = "200", description = "Profile updated"),
             @ApiResponse(responseCode = "404", description = "No user with this id")
     })
+    @PreAuthorize("#id == authentication.principal.id or hasRole('ADMIN')")
     @PutMapping("/{id}")
     public UserResponse updateUser(@PathVariable Integer id, @RequestBody UpdateUserRequest request) {
         log.debug("PUT /api/users/{}", id);
@@ -81,6 +85,7 @@ public class UserController {
             @ApiResponse(responseCode = "404", description = "No user with this id")
     })
     @PostMapping("/{id}/change-password")
+    @PreAuthorize("#id == authentication.principal.id or hasRole('ADMIN')")
     @ResponseStatus(HttpStatus.NO_CONTENT)
     public void changePassword(@PathVariable Integer id, @RequestBody ChangePasswordRequest request) {
         // Never log request.currentPassword()/newPassword() - only the id.
@@ -94,6 +99,7 @@ public class UserController {
             @ApiResponse(responseCode = "404", description = "No user with this id")
     })
     @PostMapping("/{id}/disable")
+    @PreAuthorize("hasRole('ADMIN')")
     @ResponseStatus(HttpStatus.NO_CONTENT)
     public void disableUser(@PathVariable Integer id) {
         log.debug("POST /api/users/{}/disable", id);
@@ -106,6 +112,7 @@ public class UserController {
             @ApiResponse(responseCode = "404", description = "No user with this id")
     })
     @PostMapping("/{id}/enable")
+    @PreAuthorize("hasRole('ADMIN')")
     @ResponseStatus(HttpStatus.NO_CONTENT)
     public void enableUser(@PathVariable Integer id) {
         log.debug("POST /api/users/{}/enable", id);

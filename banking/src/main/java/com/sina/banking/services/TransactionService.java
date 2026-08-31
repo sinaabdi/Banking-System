@@ -10,6 +10,7 @@ import com.sina.banking.repositories.LedgerEntryRepository;
 import com.sina.banking.repositories.TransactionRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.security.access.AccessDeniedException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -35,7 +36,7 @@ public class TransactionService {
     }
 
     @Transactional
-    public TransactionResponse deposit(CreateTransactionRequest request) {
+    public TransactionResponse deposit(CreateTransactionRequest request, Integer callerId, boolean isAdmin) {
         log.debug("Deposit requested: idempotencyKey={} accountId={} amount={}",
                 request.idempotencyKey(), request.accountId(), request.amount());
 
@@ -56,6 +57,8 @@ public class TransactionService {
         Account destinationAccount = accountRepository.findById(request.accountId())
                 .orElseThrow(() -> new NoSuchElementException("account does not exist:" + request.accountId()));
 
+        // check account ownership
+        checkAccountOwnershipOrThrow(destinationAccount, callerId, isAdmin);
         // check account status
         checkAccountActiveOrElseThrow(destinationAccount);
         // check if currency is correct
@@ -87,7 +90,7 @@ public class TransactionService {
     }
 
     @Transactional
-    public TransactionResponse withdraw(CreateTransactionRequest request) {
+    public TransactionResponse withdraw(CreateTransactionRequest request, Integer callerId, boolean isAdmin) {
         log.debug("Withdraw requested: idempotencyKey={} accountId={} amount={}",
                 request.idempotencyKey(), request.accountId(), request.amount());
 
@@ -108,7 +111,11 @@ public class TransactionService {
         Account destinationAccount = findAccountForUpdateOrElseThrow(request.accountId());
         log.debug("Locked account id={} for withdrawal", destinationAccount.getId());
 
+        // check account ownership
+        checkAccountOwnershipOrThrow(destinationAccount, callerId, isAdmin);
+        // check account status
         checkAccountActiveOrElseThrow(destinationAccount);
+        // check if currency is correct
         checkCurrencyMatchOrElseThrow(destinationAccount, request);
 
         Long balance = ledgerEntryRepository.computeBalanceForAccount(destinationAccount.getId());
@@ -142,7 +149,7 @@ public class TransactionService {
     }
 
     @Transactional
-    public TransactionResponse transfer(TransferRequest request) {
+    public TransactionResponse transfer(TransferRequest request, Integer callerId, boolean isAdmin) {
         log.debug("Transfer requested: idempotencyKey={} fromAccountId={} toAccountId={} amount={}",
                 request.idempotencyKey(), request.fromAccountId(), request.toAccountId(), request.amount());
 
@@ -178,6 +185,8 @@ public class TransactionService {
         }
         log.debug("Locked accounts fromId={} toId={} for transfer", fromAccount.getId(), toAccount.getId());
 
+        // check source account ownership
+        checkAccountOwnershipOrThrow(fromAccount, callerId, isAdmin);
         checkAccountActiveOrElseThrow(toAccount);
         checkAccountActiveOrElseThrow(fromAccount);
 
@@ -314,6 +323,12 @@ public class TransactionService {
         if (!request.currency().equals(to.getCurrency()) || !request.currency().equals(from.getCurrency())) {
             throw new IllegalArgumentException("currency mismatch, source account currency: " + from.getCurrency() + ", destination account currency: " + to.getCurrency()
             + ", request currency: " + request.currency());
+        }
+    }
+
+    private void checkAccountOwnershipOrThrow(Account account, Integer callerId, boolean isAdmin) {
+        if (!isAdmin && !callerId.equals(account.getUser().getId())) {
+            throw new AccessDeniedException("account " + account.getId() + " does not belong to caller");
         }
     }
 

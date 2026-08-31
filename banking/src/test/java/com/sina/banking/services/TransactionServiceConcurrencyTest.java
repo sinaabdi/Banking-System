@@ -6,6 +6,7 @@ import com.sina.banking.DTOs.TransactionDTOs.TransactionResponse;
 import com.sina.banking.DTOs.TransactionDTOs.CreateTransactionRequest;
 import com.sina.banking.DTOs.UserDTOs.UserResponse;
 import com.sina.banking.DTOs.UserDTOs.CreateUserRequest;
+import com.sina.banking.models.Account;
 import com.sina.banking.models.AccountType;
 import com.sina.banking.models.TransactionStatus;
 import org.junit.jupiter.api.BeforeEach;
@@ -30,6 +31,7 @@ public class TransactionServiceConcurrencyTest {
     private TransactionService transactionService;
 
     private Integer accountId;
+    private Integer userId;
 
     private static final long STARTING_BALANCE = 500L;
     private static final int THREAD_COUNT = 10;
@@ -48,6 +50,7 @@ public class TransactionServiceConcurrencyTest {
                 username + "@bank.local"
         );
         UserResponse userResponse = userService.createUser(userRequest);
+        userId = userResponse.id();
 
         // Create an account for the test user
         CreateAccountRequest accountRequest = new CreateAccountRequest(userResponse.id(), AccountType.CHECKING, "USD");
@@ -57,7 +60,7 @@ public class TransactionServiceConcurrencyTest {
         // Deposit 500L to the account
         String idempotencyKey = UUID.randomUUID().toString();
         CreateTransactionRequest depositRequest = new CreateTransactionRequest(idempotencyKey, STARTING_BALANCE, "USD", accountResponse.id());
-        TransactionResponse transactionResponse = transactionService.deposit(depositRequest);
+        TransactionResponse transactionResponse = transactionService.deposit(depositRequest, userId, false);
 
         assertThat(transactionResponse.transactionStatus()).isEqualTo(TransactionStatus.POSTED);
     }
@@ -74,7 +77,7 @@ public class TransactionServiceConcurrencyTest {
             futures.add(executor.submit(() -> {
                 startLatch.await();
                 CreateTransactionRequest request = new CreateTransactionRequest(idempotencyKey, AMOUNT_PER_WITHDRAWAL, "USD", accountId);
-                return transactionService.withdraw(request);
+                return transactionService.withdraw(request, userId, false);
             }));
         }
 

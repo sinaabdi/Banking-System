@@ -4,6 +4,7 @@ import com.sina.banking.DTOs.TransactionDTOs.ReverseTransactionRequest;
 import com.sina.banking.DTOs.TransactionDTOs.TransferRequest;
 import com.sina.banking.DTOs.TransactionDTOs.CreateTransactionRequest;
 import com.sina.banking.DTOs.TransactionDTOs.TransactionResponse;
+import com.sina.banking.security.AppUserPrincipal;
 import com.sina.banking.services.TransactionService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.responses.ApiResponse;
@@ -12,6 +13,8 @@ import io.swagger.v3.oas.annotations.tags.Tag;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.access.prepost.PreAuthorize;
+import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.web.bind.annotation.*;
 
 import java.net.URI;
@@ -36,9 +39,9 @@ public class TransactionController {
             @ApiResponse(responseCode = "404", description = "Account does not exist, or no system account is configured for this currency")
     })
     @PostMapping("/deposit")
-    public ResponseEntity<TransactionResponse> deposit(@RequestBody CreateTransactionRequest request) {
+    public ResponseEntity<TransactionResponse> deposit(@RequestBody CreateTransactionRequest request, @AuthenticationPrincipal AppUserPrincipal principal) {
         log.debug("POST /api/transactions/deposit accountId={} amount={}", request.accountId(), request.amount());
-        TransactionResponse response = transactionService.deposit(request);
+        TransactionResponse response = transactionService.deposit(request, principal.getId(), principal.isAdmin());
         return ResponseEntity.created(URI.create("/api/transactions/deposit/" + response.id())).body(response);
     }
 
@@ -49,9 +52,9 @@ public class TransactionController {
             @ApiResponse(responseCode = "404", description = "Account does not exist, or no system account is configured for this currency")
     })
     @PostMapping("/withdraw")
-    public ResponseEntity<TransactionResponse> withdraw(@RequestBody CreateTransactionRequest request) {
+    public ResponseEntity<TransactionResponse> withdraw(@RequestBody CreateTransactionRequest request, @AuthenticationPrincipal AppUserPrincipal principal) {
         log.debug("POST /api/transactions/withdraw accountId={} amount={}", request.accountId(), request.amount());
-        TransactionResponse response = transactionService.withdraw(request);
+        TransactionResponse response = transactionService.withdraw(request, principal.getId(), principal.isAdmin());
         return ResponseEntity.created(URI.create("/api/transactions/withdraw/" + response.id())).body(response);
     }
 
@@ -62,10 +65,10 @@ public class TransactionController {
             @ApiResponse(responseCode = "404", description = "Either account does not exist")
     })
     @PostMapping("/transfer")
-    public ResponseEntity<TransactionResponse> transfer(@RequestBody TransferRequest request) {
+    public ResponseEntity<TransactionResponse> transfer(@RequestBody TransferRequest request, @AuthenticationPrincipal AppUserPrincipal principal) {
         log.debug("POST /api/transactions/transfer fromAccountId={} toAccountId={} amount={}",
                 request.fromAccountId(), request.toAccountId(), request.amount());
-        TransactionResponse response = transactionService.transfer(request);
+        TransactionResponse response = transactionService.transfer(request, principal.getId(), principal.isAdmin());
         return ResponseEntity.created(URI.create("/api/transactions/transfer/" + response.id())).body(response);
     }
 
@@ -75,6 +78,7 @@ public class TransactionController {
             @ApiResponse(responseCode = "400", description = "The transaction is itself a reversal, has already been reversed, or is not in POSTED status"),
             @ApiResponse(responseCode = "404", description = "No transaction with this id")
     })
+    @PreAuthorize("hasRole('ADMIN')")
     @PostMapping("/reverse")
     public ResponseEntity<TransactionResponse> reverse(@RequestBody ReverseTransactionRequest request) {
         log.debug("POST /api/transaction/reverse transaction id={}", request.transactionId());

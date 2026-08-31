@@ -10,6 +10,7 @@ import com.sina.banking.repositories.UserRepository;
 import com.sina.banking.utils.AccountNumberGenerator;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.security.access.AccessDeniedException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -78,9 +79,11 @@ public class AccountService {
         return balance;
     }
 
-    public AccountResponse getAccountByAccountId(Integer id) {
+    public AccountResponse getAccountByAccountId(Integer id, Integer callerId, boolean isAdmin) {
         log.debug("Fetching account id={}", id);
-        return AccountResponse.from(findAccountOrThrow(id));
+        Account account = findAccountOrThrow(id);
+        checkOwnershipOrThrow(account, callerId, isAdmin);
+        return AccountResponse.from(account);
     }
 
     public List<AccountResponse> getAccountsForUser(Integer userId) {
@@ -89,15 +92,22 @@ public class AccountService {
                 map(AccountResponse::from).toList();
     }
 
-    public AccountResponse getAccountByAccountNumber(Long accountNumber) {
+    public AccountResponse getAccountByAccountNumber(Long accountNumber, Integer callerId, boolean isAdmin) {
         log.debug("Fetching account by account number");
         Account account = accountRepository.findByAccountNumber(accountNumber)
                 .orElseThrow(() -> new NoSuchElementException("account not found: " + accountNumber));
+        checkOwnershipOrThrow(account, callerId, isAdmin);
         return AccountResponse.from(account);
     }
 
     private Account findAccountOrThrow(Integer id) {
         return accountRepository.findById(id).orElseThrow(() -> new NoSuchElementException("account not found: " + id));
+    }
+
+    private void checkOwnershipOrThrow(Account account, Integer callerId, boolean isAdmin) {
+        if (!isAdmin && !callerId.equals(account.getUser().getId())) {
+            throw new AccessDeniedException("account " + account.getId() + " does not belong to caller");
+        }
     }
 
     private Long generateAccountNumber() {
