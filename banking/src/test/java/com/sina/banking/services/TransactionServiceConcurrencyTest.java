@@ -6,7 +6,6 @@ import com.sina.banking.DTOs.TransactionDTOs.TransactionResponse;
 import com.sina.banking.DTOs.TransactionDTOs.CreateTransactionRequest;
 import com.sina.banking.DTOs.UserDTOs.UserResponse;
 import com.sina.banking.DTOs.UserDTOs.CreateUserRequest;
-import com.sina.banking.models.Account;
 import com.sina.banking.models.AccountType;
 import com.sina.banking.models.TransactionStatus;
 import org.junit.jupiter.api.BeforeEach;

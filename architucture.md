@@ -9,6 +9,8 @@ username          unique
 password_hash     -- BCrypt hash, via Spring Security's PasswordEncoder; never stored/logged raw
 email             unique
 status            (ACTIVE/DISABLED/DELETED)
+role              (USER/ADMIN) -- see Authentication & Authorization below; no promotion endpoint
+                  -- yet, so ADMIN is granted by hand in the DB (the seeded "system" user is ADMIN)
 created_at
 updated_at
 ```
@@ -106,6 +108,51 @@ computeBalanceForAccount  -- the balance-derivation query
 findByTransactionId       -- used by reverse to find the entries to mirror
 ```
 
+`AUTH` (AuthenticationService)
+```
+login    -- authenticates username/password via AuthenticationManager (which delegates to
+         -- AppUserDetailsService + PasswordEncoder under the hood), then issues a JWT
+```
+
+## Authentication & Authorization
+
+Stateless JWT auth - no server-side session store. A client logs in once, gets a signed token back,
+and sends it as `Authorization: Bearer <token>` on every later request.
+
+**How a request gets authenticated:**
+1. `POST /api/auth/login` (`AuthenticationController` -> `AuthenticationService`) verifies the
+   username/password via Spring Security's `AuthenticationManager`, which under the hood calls
+   `AppUserDetailsService` (loads the `USER` row, throws `UsernameNotFoundException` if missing)
+   and checks the password against the stored BCrypt hash. A `DISABLED` user is rejected here too -
+   see `AppUserPrincipal.isEnabled()`.
+2. On success, `JwtService` signs a JWT (HMAC, key from `jwt.secret`) containing the username and
+   an expiry (`jwt.expiration-ms`). The token can't be revoked early - a leaked token is only as
+   dangerous as however long is left until it expires, which is why the expiry is kept short.
+3. Every subsequent request passes through `JwtAuthenticationFilter` (runs once per request, before
+   the rest of the chain). It validates the token's signature and expiry, loads the corresponding
+   `AppUserPrincipal` again via `AppUserDetailsService`, and populates `SecurityContext` - or, if the
+   token is missing/invalid, just leaves the request unauthenticated and lets `SecurityConfig`'s
+   `authorizeHttpRequests` rules decide whether that's allowed for the endpoint being hit.
+
+**Roles**: `USER`/`ADMIN` on `USER.role`, exposed to Spring Security as a `ROLE_USER`/`ROLE_ADMIN`
+authority (`AppUserPrincipal.getAuthorities()`). Bank-operations actions - freezing/closing/
+activating an account, reversing a transaction, disabling/enabling a user, listing all users - are
+`@PreAuthorize("hasRole('ADMIN')")`-gated; an `ADMIN` can also act on any other user's resources.
+
+**Ownership**: everywhere else, a caller can only act on their own resources. Two different
+mechanisms enforce this, depending on whether the identity being checked is already present in the
+request or has to be looked up:
+- Where the request already names a user id directly (a path variable like `UserController`'s
+  `/{id}`, or a request-body field like `AccountController.createAccount`'s `userId`),
+  `@PreAuthorize("#id == authentication.principal.id or hasRole('ADMIN')")`-style SpEL checks it
+  against the authenticated caller with no database lookup at all.
+- Where only an account/entity id is known (`AccountService.getAccountByAccountId`,
+  `TransactionService.deposit`/`withdraw`/`transfer`), the row has to be loaded first to discover
+  its owning user, then checked in the service layer (`checkAccountOwnershipOrThrow`) - an id alone
+  carries no ownership information until the row behind it is read. A mismatch throws Spring
+  Security's `AccessDeniedException`. `transfer` only checks the *source* account - the destination
+  can belong to anyone, the same way paying another person works in any real bank.
+
 ## Concurrency
 
 Two different locks protect two different things:
@@ -118,7 +165,7 @@ A concurrency test (`TransactionServiceConcurrencyTest`) fires many simultaneous
 
 ## Error handling
 
-A single `GlobalExceptionHandler` maps exceptions to HTTP responses: `NoSuchElementException` -> 404, `IllegalArgumentException` -> 400, anything else -> 500 (logged server-side with full detail; the caller only sees a generic message).
+A single `GlobalExceptionHandler` maps exceptions to HTTP responses: `NoSuchElementException` -> 404, `IllegalArgumentException` -> 400, `AuthenticationException` -> 401 (wrong credentials, unknown username, or a disabled account), `AccessDeniedException` -> 403 (a valid, authenticated caller who isn't the owner or an admin - see Authentication & Authorization above), anything else -> 500 (logged server-side with full detail; the caller only sees a generic message).
 
 ## API docs
 
