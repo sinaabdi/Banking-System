@@ -113,6 +113,23 @@ public class UserService {
         return UserResponse.from(user);
     }
 
+    @Transactional
+    public void promoteToAdmin(Integer id) {
+        User user = findUserByIdOrThrow(id);
+        user.changeUserRoleToAdmin();
+        log.info("Promote user id={} to ADMIN", id);
+    }
+
+    @Transactional
+    public void demoteToUser(Integer id, Integer callerId) {
+        if (callerId.equals(id)) {
+            throw new IllegalArgumentException("cannot demote your own account");
+        }
+        User user = findUserByIdOrThrow(id);
+        user.changeUserRoleToUser();
+        log.info("Demote user id={} to USER", id);
+    }
+
     private User findUserByIdOrThrow(Integer id) {
         return userRepository.findById(id).orElseThrow( () -> new NoSuchElementException("user not found: " + id));
     }

@@ -36,6 +36,7 @@ public class TransactionController {
     @ApiResponses({
             @ApiResponse(responseCode = "201", description = "Deposit posted (or the original result, if this idempotency key was already processed)"),
             @ApiResponse(responseCode = "400", description = "Amount is not positive, account is not active, or currency does not match the account"),
+            @ApiResponse(responseCode = "403", description = "The account does not belong to the caller"),
             @ApiResponse(responseCode = "404", description = "Account does not exist, or no system account is configured for this currency")
     })
     @PostMapping("/deposit")
@@ -49,6 +50,7 @@ public class TransactionController {
     @ApiResponses({
             @ApiResponse(responseCode = "201", description = "Withdrawal posted (or the original result, if this idempotency key was already processed)"),
             @ApiResponse(responseCode = "400", description = "Amount is not positive, account is not active, currency does not match the account, or the balance is insufficient"),
+            @ApiResponse(responseCode = "403", description = "The account does not belong to the caller"),
             @ApiResponse(responseCode = "404", description = "Account does not exist, or no system account is configured for this currency")
     })
     @PostMapping("/withdraw")
@@ -62,6 +64,7 @@ public class TransactionController {
     @ApiResponses({
             @ApiResponse(responseCode = "201", description = "Transfer posted (or the original result, if this idempotency key was already processed)"),
             @ApiResponse(responseCode = "400", description = "Amount is not positive, source and destination are the same account, either account is not active, currency does not match either account, or the source balance is insufficient"),
+            @ApiResponse(responseCode = "403", description = "The source account does not belong to the caller"),
             @ApiResponse(responseCode = "404", description = "Either account does not exist")
     })
     @PostMapping("/transfer")
@@ -89,22 +92,24 @@ public class TransactionController {
     @Operation(summary = "Get a transaction by id")
     @ApiResponses({
             @ApiResponse(responseCode = "200", description = "Transaction found"),
+            @ApiResponse(responseCode = "403", description = "The caller does not own any account involved in this transaction"),
             @ApiResponse(responseCode = "404", description = "No transaction with this id")
     })
     @GetMapping("/{id}")
-    public TransactionResponse getTransactionById(@PathVariable Integer id) {
+    public TransactionResponse getTransactionById(@PathVariable Integer id, @AuthenticationPrincipal AppUserPrincipal principal) {
         log.debug("GET /api/transactions/{}", id);
-        return transactionService.getTransactionById(id);
+        return transactionService.getTransactionById(id, principal.getId(), principal.isAdmin());
     }
 
     @Operation(summary = "Get a transaction by its idempotency key")
     @ApiResponses({
             @ApiResponse(responseCode = "200", description = "Transaction found"),
+            @ApiResponse(responseCode = "403", description = "The caller does not own any account involved in this transaction"),
             @ApiResponse(responseCode = "404", description = "No transaction with this idempotency key")
     })
     @GetMapping("/by-idempotency-key/{idempotencyKey}")
-    public TransactionResponse getTransactionByIdempotencyKey(@PathVariable String idempotencyKey) {
+    public TransactionResponse getTransactionByIdempotencyKey(@PathVariable String idempotencyKey, @AuthenticationPrincipal AppUserPrincipal principal) {
         log.debug("GET /api/transactions/by-idempotency-key/{}", idempotencyKey);
-        return transactionService.getTransactionByIdempotencyKey(idempotencyKey);
+        return transactionService.getTransactionByIdempotencyKey(idempotencyKey, principal.getId(), principal.isAdmin());
     }
 }

@@ -2,6 +2,7 @@ package com.sina.banking.services;
 
 import com.sina.banking.DTOs.UserDTOs.*;
 import com.sina.banking.models.User;
+import com.sina.banking.models.UserRole;
 import com.sina.banking.models.UserStatus;
 import com.sina.banking.repositories.UserRepository;
 import org.junit.jupiter.api.BeforeEach;
@@ -23,6 +24,8 @@ import static org.mockito.Mockito.when;
 
 @ExtendWith(MockitoExtension.class)
 public class UserServiceTest {
+
+    private final Integer USER_ID = 1;
 
     @Mock
     private UserRepository userRepository;
@@ -83,7 +86,7 @@ public class UserServiceTest {
     void updateUser_successfullyUpdateUser() {
         UpdateUserRequest updateUserRequest = new UpdateUserRequest("Jane", "Smith", "updateduser@bank.local");
 
-        when(userRepository.findById(1)).thenReturn(Optional.of(user));
+        when(userRepository.findById(USER_ID)).thenReturn(Optional.of(user));
         UserResponse response = userService.updateUser(1, updateUserRequest);
 
         assertThat(response).isNotNull();
@@ -123,9 +126,9 @@ public class UserServiceTest {
     void changePassword_userNotFound() {
         String newPassword = "!@#new_password";
         ChangePasswordRequest passwordRequest = new ChangePasswordRequest(userRequest.password(), newPassword);
-        when(userRepository.findById(1)).thenReturn(Optional.empty());
+        when(userRepository.findById(USER_ID)).thenReturn(Optional.empty());
 
-        assertThatThrownBy(() -> userService.changePassword(1, passwordRequest)).isInstanceOf(NoSuchElementException.class)
+        assertThatThrownBy(() -> userService.changePassword(USER_ID, passwordRequest)).isInstanceOf(NoSuchElementException.class)
                 .hasMessageContaining("user not found");
     }
 
@@ -135,51 +138,51 @@ public class UserServiceTest {
         String wrongPassword = "$wrongPassword$";
         ChangePasswordRequest passwordRequest = new ChangePasswordRequest(wrongPassword, newPassword);
 
-        when(userRepository.findById(1)).thenReturn(Optional.of(user));
+        when(userRepository.findById(USER_ID)).thenReturn(Optional.of(user));
         when(passwordEncoder.matches(wrongPassword, user.getPasswordHash())).thenReturn(false);
 
-        assertThatThrownBy(() -> userService.changePassword(1, passwordRequest)).isInstanceOf(IllegalArgumentException.class)
+        assertThatThrownBy(() -> userService.changePassword(USER_ID, passwordRequest)).isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("current password is incorrect");
     }
 
     @Test
     void disableUser_successfullyDisableUser() {
-        when(userRepository.findById(1)).thenReturn(Optional.of(user));
+        when(userRepository.findById(USER_ID)).thenReturn(Optional.of(user));
 
-        userService.disableUser(1);
+        userService.disableUser(USER_ID);
 
         assertThat(user.getStatus()).isEqualTo(UserStatus.DISABLED);
     }
 
     @Test
     void disableUser_userNotFound() {
-        when(userRepository.findById(1)).thenReturn(Optional.empty());
+        when(userRepository.findById(USER_ID)).thenReturn(Optional.empty());
 
-        assertThatThrownBy(() -> userService.disableUser(1)).isInstanceOf(NoSuchElementException.class)
+        assertThatThrownBy(() -> userService.disableUser(USER_ID)).isInstanceOf(NoSuchElementException.class)
                 .hasMessageContaining("user not found");
     }
 
     @Test
     void enableUser_successfullyEnableUser() {
-        when(userRepository.findById(1)).thenReturn(Optional.of(user));
+        when(userRepository.findById(USER_ID)).thenReturn(Optional.of(user));
 
-        userService.enableUser(1);
+        userService.enableUser(USER_ID);
 
         assertThat(user.getStatus()).isEqualTo(UserStatus.ACTIVE);
     }
 
     @Test
     void enableUser_userNotFound() {
-        when(userRepository.findById(1)).thenReturn(Optional.empty());
+        when(userRepository.findById(USER_ID)).thenReturn(Optional.empty());
 
-        assertThatThrownBy(() -> userService.enableUser(1)).isInstanceOf(NoSuchElementException.class)
+        assertThatThrownBy(() -> userService.enableUser(USER_ID)).isInstanceOf(NoSuchElementException.class)
                 .hasMessageContaining("user not found");
     }
 
     @Test
     void getUserById_successfullyGetUser() {
-        when(userRepository.findById(1)).thenReturn(Optional.of(user));
-        UserResponse response = userService.getUserById(1);
+        when(userRepository.findById(USER_ID)).thenReturn(Optional.of(user));
+        UserResponse response = userService.getUserById(USER_ID);
         assertThat(response).isNotNull();
         assertThat(response.username()).isEqualTo(user.getUsername());
         assertThat(response.firstName()).isEqualTo(user.getFirstName());
@@ -190,9 +193,9 @@ public class UserServiceTest {
 
     @Test
     void getUserById_userNotFound() {
-        when(userRepository.findById(1)).thenReturn(Optional.empty());
+        when(userRepository.findById(USER_ID)).thenReturn(Optional.empty());
 
-        assertThatThrownBy(() -> userService.getUserById(1)).isInstanceOf(NoSuchElementException.class)
+        assertThatThrownBy(() -> userService.getUserById(USER_ID)).isInstanceOf(NoSuchElementException.class)
                 .hasMessageContaining("user not found");
     }
 
@@ -248,5 +251,53 @@ public class UserServiceTest {
 
         assertThatThrownBy(() -> userService.getUserByUsername(userRequest.username())).isInstanceOf(NoSuchElementException.class)
                 .hasMessageContaining("user not found");
+    }
+
+    @Test
+    void promoteToAdmin_successfullyPromote() {
+        user.changeUserRoleToUser();
+        when(userRepository.findById(USER_ID)).thenReturn(Optional.of(user));
+
+        userService.promoteToAdmin(USER_ID);
+
+        assertThat(user.getRole()).isEqualTo(UserRole.ADMIN);
+    }
+
+    @Test
+    void promoteToAdmin_userNotFound() {
+        when(userRepository.findById(USER_ID)).thenReturn(Optional.empty());
+
+        assertThatThrownBy( () -> userService.promoteToAdmin(USER_ID))
+                .isInstanceOf(NoSuchElementException.class)
+                .hasMessageContaining("user not found");
+    }
+
+    @Test
+    void demoteToUser_successfullyDemote() {
+        Integer CALLER_ID = 2;
+        user.changeUserRoleToAdmin();
+        when(userRepository.findById(USER_ID)).thenReturn(Optional.of(user));
+
+        userService.demoteToUser(USER_ID, CALLER_ID);
+
+        assertThat(user.getRole()).isEqualTo(UserRole.USER);
+    }
+
+    @Test
+    void demoteToUser_userNotFound() {
+        Integer CALLER_ID = 2;
+        when(userRepository.findById(USER_ID)).thenReturn(Optional.empty());
+
+        assertThatThrownBy( () -> userService.demoteToUser(USER_ID, CALLER_ID))
+                .isInstanceOf(NoSuchElementException.class)
+                .hasMessageContaining("user not found");
+    }
+
+    @Test
+    void demoteToUser_demoteYourOwnAccount() {
+
+        assertThatThrownBy( () -> userService.demoteToUser(USER_ID, USER_ID))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("cannot demote your own account");
     }
 }

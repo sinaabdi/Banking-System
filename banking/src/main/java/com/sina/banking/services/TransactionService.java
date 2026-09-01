@@ -287,15 +287,18 @@ public class TransactionService {
         return TransactionResponse.from(reverseTransaction);
     }
 
-    public TransactionResponse getTransactionById(Integer id) {
+    public TransactionResponse getTransactionById(Integer id, Integer callerId, boolean isAdmin) {
         log.debug("Fetching transaction id={}", id);
-        return TransactionResponse.from(findTransactionOrThrow(id));
+        Transaction transaction = findTransactionOrThrow(id);
+        checkTransactionOwnershipOrThrow(transaction, callerId, isAdmin);
+        return TransactionResponse.from(transaction);
     }
 
-    public TransactionResponse getTransactionByIdempotencyKey(String idempotencyKey) {
+    public TransactionResponse getTransactionByIdempotencyKey(String idempotencyKey, Integer callerId, boolean isAdmin) {
         log.debug("Fetching transaction by idempotencyKey={}", idempotencyKey);
         Transaction transaction = transactionRepository.findByIdempotencyKey(idempotencyKey)
                 .orElseThrow(() -> new NoSuchElementException("idempotency key not found: " + idempotencyKey));
+        checkTransactionOwnershipOrThrow(transaction, callerId, isAdmin);
         return TransactionResponse.from(transaction);
     }
 
@@ -329,6 +332,17 @@ public class TransactionService {
     private void checkAccountOwnershipOrThrow(Account account, Integer callerId, boolean isAdmin) {
         if (!isAdmin && !callerId.equals(account.getUser().getId())) {
             throw new AccessDeniedException("account " + account.getId() + " does not belong to caller");
+        }
+    }
+
+    private void checkTransactionOwnershipOrThrow(Transaction transaction, Integer callerId, boolean isAdmin) {
+        if (isAdmin) {
+            return;
+        }
+        List<LedgerEntry> entries = ledgerEntryRepository.findByTransactionId(transaction.getId());
+        boolean callerIdIsInvolved = entries.stream().anyMatch(entry -> callerId.equals(entry.getAccount().getUser().getId()));
+        if (!callerIdIsInvolved) {
+            throw new AccessDeniedException("transaction " + transaction.getId() + " does not belong to caller");
         }
     }
 

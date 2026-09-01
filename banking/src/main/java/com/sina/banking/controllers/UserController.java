@@ -4,6 +4,7 @@ import com.sina.banking.DTOs.UserDTOs.CreateUserRequest;
 import com.sina.banking.DTOs.UserDTOs.UpdateUserRequest;
 import com.sina.banking.DTOs.UserDTOs.ChangePasswordRequest;
 import com.sina.banking.DTOs.UserDTOs.UserResponse;
+import com.sina.banking.security.AppUserPrincipal;
 import com.sina.banking.services.UserService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.responses.ApiResponse;
@@ -14,6 +15,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.access.prepost.PreAuthorize;
+import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.web.bind.annotation.*;
 
 import java.net.URI;
@@ -117,5 +119,32 @@ public class UserController {
     public void enableUser(@PathVariable Integer id) {
         log.debug("POST /api/users/{}/enable", id);
         userService.enableUser(id);
+    }
+
+    @Operation(summary = "Promote a user to Admin")
+    @ApiResponses({
+            @ApiResponse(responseCode = "204", description = "user promoted"),
+            @ApiResponse(responseCode = "404", description = "No user with this id")
+    })
+    @PostMapping("/{id}/promote")
+    @PreAuthorize("hasRole('ADMIN')")
+    @ResponseStatus(HttpStatus.NO_CONTENT)
+    public void promoteToAdmin(@PathVariable Integer id) {
+        log.debug("POST /api/users/{}/promote", id);
+        userService.promoteToAdmin(id);
+    }
+
+    @Operation(summary = "Demote a admin to User")
+    @ApiResponses({
+            @ApiResponse(responseCode = "204", description = "admin demoted"),
+            @ApiResponse(responseCode = "400", description = "Cannot demote your own account"),
+            @ApiResponse(responseCode = "404", description = "No admin with this id")
+    })
+    @PostMapping("/{id}/demote")
+    @PreAuthorize("hasRole('ADMIN')")
+    @ResponseStatus(HttpStatus.NO_CONTENT)
+    public void demoteToUser(@PathVariable Integer id, @AuthenticationPrincipal AppUserPrincipal principal) {
+        log.debug("POST /api/users/{}/demote", id);
+        userService.demoteToUser(id, principal.getId());
     }
 }

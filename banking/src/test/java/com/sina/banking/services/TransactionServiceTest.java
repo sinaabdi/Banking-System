@@ -29,7 +29,9 @@ import static org.mockito.Mockito.*;
 @ExtendWith(MockitoExtension.class)
 public class TransactionServiceTest {
 
+    private final String IDEMPOTENCY_KEY = "idem-key-123";
     private final Integer CALLER_ID = 1;
+    private final Integer WRONG_CALLER_ID = 99;
 
     @Mock
     private TransactionRepository transactionRepository;
@@ -58,19 +60,19 @@ public class TransactionServiceTest {
         systemAccount = mock(Account.class);
         transferToAccount = mock(Account.class);
         request = new CreateTransactionRequest(
-                "idem-key-123",
+                IDEMPOTENCY_KEY,
                 100L,
                 "USD",
                 1);
         transferRequest = new TransferRequest(
-                "idem-key-123",
+                IDEMPOTENCY_KEY,
                 100L,
                 "USD",
                 1,
                 10
         );
         reverseRequest = new ReverseTransactionRequest(
-                "idem-key-123",
+                IDEMPOTENCY_KEY,
                 1
         );
     }
@@ -123,7 +125,7 @@ public class TransactionServiceTest {
 
     @Test
     void deposit_amountIsNotPositive() {
-        CreateTransactionRequest zeroAmountRequest = new CreateTransactionRequest("idem-key-123", 0L, "USD", 1);
+        CreateTransactionRequest zeroAmountRequest = new CreateTransactionRequest(IDEMPOTENCY_KEY, 0L, "USD", 1);
         when(transactionRepository.findByIdempotencyKey(request.idempotencyKey())).thenReturn(Optional.empty());
 
         assertThatThrownBy(() -> transactionService.deposit(zeroAmountRequest, CALLER_ID, false)).isInstanceOf(IllegalArgumentException.class)
@@ -289,7 +291,7 @@ public class TransactionServiceTest {
 
     @Test
     void withdraw_amountIsNotPositive() {
-        CreateTransactionRequest zeroAmountRequest = new CreateTransactionRequest("idem-key-123", 0L, "USD", 1);
+        CreateTransactionRequest zeroAmountRequest = new CreateTransactionRequest(IDEMPOTENCY_KEY, 0L, "USD", 1);
         when(transactionRepository.findByIdempotencyKey(request.idempotencyKey())).thenReturn(Optional.empty());
 
         assertThatThrownBy(() -> transactionService.withdraw(zeroAmountRequest, CALLER_ID, false)).isInstanceOf(IllegalArgumentException.class)
@@ -730,14 +732,15 @@ public class TransactionServiceTest {
 
     @Test
     void getTransactionById_transactionExists() {
-        String idemKey = "idem-key-123";
-        Transaction transaction = new Transaction(TransactionType.DEPOSIT, TransactionStatus.POSTED, idemKey);
+        Transaction transaction = new Transaction(TransactionType.DEPOSIT, TransactionStatus.POSTED, IDEMPOTENCY_KEY);
+        List<LedgerEntry> entries = getMockLedgerEntries(transaction);
+        when(ledgerEntryRepository.findByTransactionId(transaction.getId())).thenReturn(entries);
         when(transactionRepository.findById(1)).thenReturn(Optional.of(transaction));
 
-        TransactionResponse response = transactionService.getTransactionById(1);
+        TransactionResponse response = transactionService.getTransactionById(1, CALLER_ID, false);
 
         assertThat(response).isNotNull();
-        assertThat(response.idempotencyKey()).isEqualTo(idemKey);
+        assertThat(response.idempotencyKey()).isEqualTo(IDEMPOTENCY_KEY);
         assertThat(response.transactionType()).isEqualTo(TransactionType.DEPOSIT);
         assertThat(response.transactionStatus()).isEqualTo(TransactionStatus.POSTED);
     }
@@ -746,33 +749,108 @@ public class TransactionServiceTest {
     void getTransactionById_transactionDoesNotExists() {
         when(transactionRepository.findById(1)).thenReturn(Optional.empty());
 
-        assertThatThrownBy(() -> transactionService.getTransactionById(1)).isInstanceOf(NoSuchElementException.class)
+        assertThatThrownBy(() -> transactionService.getTransactionById(1, CALLER_ID, false)).isInstanceOf(NoSuchElementException.class)
                 .hasMessageContaining("transaction not found");
     }
 
+    @Test
+    void getTransactionById_callerDoesNotOwnTransaction() {
+        Transaction transaction = new Transaction(TransactionType.DEPOSIT, TransactionStatus.POSTED, IDEMPOTENCY_KEY);
+        List<LedgerEntry> entries = getMockLedgerEntries(transaction);
+        when(ledgerEntryRepository.findByTransactionId(transaction.getId())).thenReturn(entries);
+        when(transactionRepository.findById(1)).thenReturn(Optional.of(transaction));
+
+        assertThatThrownBy(() -> transactionService.getTransactionById(1, WRONG_CALLER_ID, false))
+                .isInstanceOf(AccessDeniedException.class)
+                .hasMessageContaining("does not belong to caller");
+    }
+
+    @Test
+    void getTransactionById_callerOwnsOnlyOneOfTwoAccounts() {
+        Transaction transaction = new Transaction(TransactionType.TRANSFER, TransactionStatus.POSTED, IDEMPOTENCY_KEY);
+        transaction.setId(1);
+        Account otherAccount = mock(Account.class); // owned by someone else entirely
+        User otherOwner = mock(User.class);
+        when(otherOwner.getId()).thenReturn(999);
+        when(otherAccount.getUser()).thenReturn(otherOwner);
+        LedgerEntry debit = new LedgerEntry(transaction, account, TransactionDirection.DEBIT, 100L, "USD");
+        LedgerEntry credit = new LedgerEntry(transaction, otherAccount, TransactionDirection.CREDIT, 100L, "USD"); // otherAccount's owner is someone else
+        // credit (the non-owned account) listed first, so anyMatch is forced to evaluate past a
+        // non-match before reaching debit - proves this checks "any" account, not just the first.
+        when(ledgerEntryRepository.findByTransactionId(1)).thenReturn(List.of(credit, debit));
+        when(transactionRepository.findById(1)).thenReturn(Optional.of(transaction));
+
+        TransactionResponse response = transactionService.getTransactionById(1, CALLER_ID, false);
+
+        assertThat(response).isNotNull();
+    }
 
 
     @Test
-    void getTransactionByIdempotencyKey_idempotencyKeyDoesNotExists() {
-        String idemKey = "idem-key-123";
-        when(transactionRepository.findByIdempotencyKey(idemKey)).thenReturn(Optional.empty());
+    void getTransactionById_getTransactionWithAdmin() {
+        Transaction transaction = new Transaction(TransactionType.DEPOSIT, TransactionStatus.POSTED, IDEMPOTENCY_KEY);
+        when(transactionRepository.findById(1)).thenReturn(Optional.of(transaction));
 
-        assertThatThrownBy(() -> transactionService.getTransactionByIdempotencyKey(idemKey)).isInstanceOf(NoSuchElementException.class)
+        TransactionResponse response = transactionService.getTransactionById(1, WRONG_CALLER_ID, true);
+
+        assertThat(response).isNotNull();
+        assertThat(response.idempotencyKey()).isEqualTo(IDEMPOTENCY_KEY);
+        assertThat(response.transactionType()).isEqualTo(TransactionType.DEPOSIT);
+        assertThat(response.transactionStatus()).isEqualTo(TransactionStatus.POSTED);
+    }
+
+    @Test
+    void getTransactionByIdempotencyKey_idempotencyKeyDoesNotExists() {
+        when(transactionRepository.findByIdempotencyKey(IDEMPOTENCY_KEY)).thenReturn(Optional.empty());
+
+        assertThatThrownBy(() -> transactionService.getTransactionByIdempotencyKey(IDEMPOTENCY_KEY, CALLER_ID, false)).isInstanceOf(NoSuchElementException.class)
                 .hasMessageContaining("idempotency key not found");
     }
 
     @Test
     void getTransactionByIdempotencyKey_idempotencyKeyExists() {
-        String idemKey = "idem-key-123";
-        Transaction transaction = new Transaction(TransactionType.DEPOSIT, TransactionStatus.POSTED, idemKey);
+        Transaction transaction = new Transaction(TransactionType.DEPOSIT, TransactionStatus.POSTED, IDEMPOTENCY_KEY);
+        List<LedgerEntry> entries = getMockLedgerEntries(transaction);
+        when(ledgerEntryRepository.findByTransactionId(transaction.getId())).thenReturn(entries);
+        when(transactionRepository.findByIdempotencyKey(IDEMPOTENCY_KEY)).thenReturn(Optional.of(transaction));
 
-        when(transactionRepository.findByIdempotencyKey(idemKey)).thenReturn(Optional.of(transaction));
-
-        TransactionResponse response = transactionService.getTransactionByIdempotencyKey(idemKey);
+        TransactionResponse response = transactionService.getTransactionByIdempotencyKey(IDEMPOTENCY_KEY, CALLER_ID, false);
 
         assertThat(response).isNotNull();
-        assertThat(response.idempotencyKey()).isEqualTo(idemKey);
+        assertThat(response.idempotencyKey()).isEqualTo(IDEMPOTENCY_KEY);
         assertThat(response.transactionType()).isEqualTo(TransactionType.DEPOSIT);
         assertThat(response.transactionStatus()).isEqualTo(TransactionStatus.POSTED);
+    }
+
+    @Test
+    void getTransactionByIdempotencyKey_callerDoesNotOwnTransaction() {
+        Transaction transaction = new Transaction(TransactionType.DEPOSIT, TransactionStatus.POSTED, IDEMPOTENCY_KEY);
+        List<LedgerEntry> entries = getMockLedgerEntries(transaction);
+        when(ledgerEntryRepository.findByTransactionId(transaction.getId())).thenReturn(entries);
+        when(transactionRepository.findByIdempotencyKey(IDEMPOTENCY_KEY)).thenReturn(Optional.of(transaction));
+
+        assertThatThrownBy(() -> transactionService.getTransactionByIdempotencyKey(IDEMPOTENCY_KEY, WRONG_CALLER_ID, false))
+                .isInstanceOf(AccessDeniedException.class)
+                .hasMessageContaining("does not belong to caller");
+    }
+
+    @Test
+    void getTransactionByIdempotencyKey_getTransactionWithAdmin() {
+        Transaction transaction = new Transaction(TransactionType.DEPOSIT, TransactionStatus.POSTED, IDEMPOTENCY_KEY);
+        when(transactionRepository.findByIdempotencyKey(IDEMPOTENCY_KEY)).thenReturn(Optional.of(transaction));
+
+        TransactionResponse response = transactionService.getTransactionByIdempotencyKey(IDEMPOTENCY_KEY, WRONG_CALLER_ID, true);
+
+        assertThat(response).isNotNull();
+        assertThat(response.idempotencyKey()).isEqualTo(IDEMPOTENCY_KEY);
+        assertThat(response.transactionType()).isEqualTo(TransactionType.DEPOSIT);
+        assertThat(response.transactionStatus()).isEqualTo(TransactionStatus.POSTED);
+    }
+
+    private List<LedgerEntry> getMockLedgerEntries(Transaction transaction) {
+        transaction.setId(1);
+        LedgerEntry debit = new LedgerEntry(transaction, account, TransactionDirection.DEBIT, 100L, "USD");
+        LedgerEntry credit = new LedgerEntry(transaction, account, TransactionDirection.CREDIT, 100L, "USD");
+         return List.of(debit, credit);
     }
 }
