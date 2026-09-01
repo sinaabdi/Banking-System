@@ -1,0 +1,54 @@
+# Build output — rebuilt inside the image, no need to send it in the
+# Docker build context (and .jar/.class here would be stale anyway)
+build/
+out/
+target/
+*.class
+
+# Gradle
+.gradle/
+gradle-app.setting
+!banking/gradle/wrapper/gradle-wrapper.jar
+
+# Maven (harmless to keep even if you're on Gradle, in case you ever mix)
+.mvn/
+mvnw
+mvnw.cmd
+
+# IDE
+.idea/
+*.iml
+*.iws
+.vscode/
+.settings/
+.classpath
+.project
+
+# OS cruft
+.DS_Store
+Thumbs.db
+
+# Version control — the image doesn't need git history
+.git/
+.gitignore
+.gitattributes
+
+# Env/secrets — never bake these into an image layer
+.env
+.env.*
+*.pem
+*.key
+
+# Logs
+*.log
+logs/
+
+# Docker itself
+Dockerfile
+docker-compose*.yml
+.dockerignore
+
+# Tests and docs — not needed at runtime
+banking/src/test/
+*.md
+docs/
