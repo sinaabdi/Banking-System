@@ -9,8 +9,8 @@ username          unique
 password_hash     -- BCrypt hash, via Spring Security's PasswordEncoder; never stored/logged raw
 email             unique
 status            (ACTIVE/DISABLED/DELETED)
-role              (USER/ADMIN) -- see Authentication & Authorization below; no promotion endpoint
-                  -- yet, so ADMIN is granted by hand in the DB (the seeded "system" user is ADMIN)
+role              (USER/ADMIN) -- see Authentication & Authorization below; promoted/demoted via
+                  -- UserService.promoteToAdmin/demoteToUser (the seeded "system" user starts as ADMIN)
 created_at
 updated_at
 ```
@@ -63,6 +63,8 @@ updateUser               -- updates first name, last name, email (not username)
 changePassword            -- verifies current password via PasswordEncoder.matches, hashes the new one
 disableUser
 enableUser
+promoteToAdmin           -- grants ADMIN
+demoteToUser             -- revokes ADMIN; rejects a caller trying to demote their own account
 getUserById
 getUserByEmail
 getUserByUsername
@@ -138,6 +140,9 @@ and sends it as `Authorization: Bearer <token>` on every later request.
 authority (`AppUserPrincipal.getAuthorities()`). Bank-operations actions - freezing/closing/
 activating an account, reversing a transaction, disabling/enabling a user, listing all users - are
 `@PreAuthorize("hasRole('ADMIN')")`-gated; an `ADMIN` can also act on any other user's resources.
+Promotion itself (`UserService.promoteToAdmin`/`demoteToUser`) is admin-only too, with one extra
+guard: an admin can't demote their own account, so there's always at least one ADMIN left to grant
+roles - self-demotion throws `IllegalArgumentException` (400) rather than locking the caller out.
 
 **Ownership**: everywhere else, a caller can only act on their own resources. Two different
 mechanisms enforce this, depending on whether the identity being checked is already present in the
@@ -170,3 +175,27 @@ A single `GlobalExceptionHandler` maps exceptions to HTTP responses: `NoSuchElem
 ## API docs
 
 `springdoc-openapi` is wired in - Swagger UI at `/swagger-ui/index.html`, raw OpenAPI spec at `/v3/api-docs`.
+
+## Containerization
+
+The `Dockerfile` (repo root) is a two-stage build:
+1. **`builder`** (`eclipse-temurin:25-jdk-*`) - copies the Gradle wrapper and `build.gradle` first and
+   resolves dependencies before copying `src/`, so editing source code doesn't invalidate the
+   dependency-download layer on rebuild. Then runs `./gradlew bootJar`.
+2. **runtime** (`eclipse-temurin:25-jre-*`) - copies only the built jar out of `builder` via
+   `COPY --from=builder`. No JDK, no Gradle, no source ever reaches this image - just a JRE and one
+   jar.
+
+`docker-compose.yml` runs this alongside Postgres, both on a `backend` bridge network so Compose's
+internal DNS resolves the service name `postgres` to the database container - unlike the host
+workflow, `localhost` inside `core`'s container means the container itself, not the database.
+
+This is why `application.properties`'s datasource settings are `${DB_URL:localhost}`-style
+placeholders rather than the previously-hardcoded `localhost:5432`: the defaults keep
+`./gradlew bootRun` working unchanged on the host, while `core`'s `env_file: .env` overrides
+`DB_URL`/`DB_PORT`/`DB_USERNAME`/`DB_PASSWORD`/`DB_NAME` to point at the `postgres` service instead.
+
+`postgres` has a `pg_isready` healthcheck, and `core` declares `depends_on: postgres: condition:
+service_healthy` rather than a bare `depends_on` - a container starting isn't the same moment as
+Postgres actually accepting connections (especially on a first run, before `initdb` finishes), and
+Spring Boot doesn't retry a failed initial datasource connection.

@@ -38,6 +38,21 @@ The API is now up at `http://localhost:8080`.
 ```
 Postgres needs to be running for this too - one test (`TransactionServiceConcurrencyTest`) fires real concurrent requests against a real database to prove the pessimistic-locking strategy actually prevents an account from being overdrawn; that's not something a mocked repository can verify.
 
+## Running it with Docker Compose
+
+Alternatively, run the whole stack - app and Postgres - in containers, no local JDK/Gradle needed:
+```bash
+docker compose up --build
+```
+This builds the app image from the repo-root `Dockerfile` (a multi-stage build: compile with the JDK,
+run with just a JRE), starts Postgres, waits for it to actually be ready to accept connections (not
+just for its container to start), then starts the app. The API is up at `http://localhost:8080`,
+same as the local workflow.
+
+The containerized app gets its datasource settings from the `.env` file at the repo root
+(`DB_URL=postgres` - Compose's internal DNS resolves that to the Postgres container) instead of
+`application.properties`'s `localhost` defaults, which stay in place for `./gradlew bootRun`.
+
 ## Configuration
 
 `application.properties` ships with a working local JWT secret (`jwt.secret`) and a 1-hour expiry (`jwt.expiration-ms`) so the app runs out of the box. **The committed secret is for local development only** - in any shared or deployed environment, this should come from an environment variable or a secrets manager instead, never from a file checked into version control.
@@ -67,7 +82,7 @@ curl http://localhost:8080/api/users/1 \
   -H "Authorization: Bearer eyJhbGciOi..."
 ```
 
-A user can only act on their own resources (their own profile, their own accounts); an `ADMIN` (granted by hand in the database for now - there's no promotion endpoint yet) can act on anyone's.
+A user can only act on their own resources (their own profile, their own accounts); an `ADMIN` can act on anyone's, and can grant/revoke the `ADMIN` role on other users via `POST /api/users/{id}/promote` and `/demote`.
 
 ## API docs
 
