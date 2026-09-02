@@ -1,0 +1,61 @@
+package com.sina.banking.errors;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ProblemDetail;
+import org.springframework.http.ResponseEntity;
+import org.springframework.security.access.AccessDeniedException;
+import org.springframework.security.core.AuthenticationException;
+import org.springframework.web.bind.annotation.ExceptionHandler;
+import org.springframework.web.bind.annotation.RestControllerAdvice;
+
+import java.util.NoSuchElementException;
+
+// Central place that turns thrown exceptions into HTTP responses, so every controller/service
+// can just throw and not worry about status codes. NoSuchElementException -> 404 ("doesn't
+// exist"), IllegalArgumentException -> 400 ("exists but this request is invalid"),
+// AuthenticationException -> 401 ("wrong credentials, unknown username, or disabled account" -
+// see AuthenticationService/AppUserDetailsService), AccessDeniedException -> 403 ("I know who
+// you are, but you're not allowed to do this" - e.g. a @PreAuthorize ownership/role check
+// failing on a valid, logged-in caller), anything else -> 500 with a generic message (the real
+// exception is logged server-side, never exposed to the caller).
+@RestControllerAdvice
+public class GlobalExceptionHandler {
+
+    private static final Logger log = LoggerFactory.getLogger(GlobalExceptionHandler.class);
+
+    @ExceptionHandler(NoSuchElementException.class)
+    public ResponseEntity<ProblemDetail> handleNotFound(NoSuchElementException ex) {
+        log.warn("Not found: {}", ex.getMessage());
+        return build(HttpStatus.NOT_FOUND, ex.getMessage());
+    }
+
+    @ExceptionHandler(IllegalArgumentException.class)
+    public ResponseEntity<ProblemDetail> handleRequest(IllegalArgumentException ex) {
+        log.warn("Bad request: {}", ex.getMessage());
+        return build(HttpStatus.BAD_REQUEST, ex.getMessage());
+    }
+
+    @ExceptionHandler(AuthenticationException.class)
+    public ResponseEntity<ProblemDetail> handleAuthFailed(AuthenticationException ex) {
+        log.warn("Authentication failed: {}", ex.getMessage());
+        return build(HttpStatus.UNAUTHORIZED, ex.getMessage());
+    }
+
+    @ExceptionHandler(AccessDeniedException.class)
+    public ResponseEntity<ProblemDetail> handleAccessDenied(AccessDeniedException ex) {
+        log.warn("Access denied: {}", ex.getMessage());
+        return build(HttpStatus.FORBIDDEN, ex.getMessage());
+    }
+
+    @ExceptionHandler(Exception.class)
+    public ResponseEntity<ProblemDetail> handleUnexpected(Exception ex) {
+        log.error("Unexpected error", ex);
+        return build(HttpStatus.INTERNAL_SERVER_ERROR, "unexpected error");
+    }
+
+    private ResponseEntity<ProblemDetail> build(HttpStatus status, String message) {
+        return ResponseEntity.status(status).body(ProblemDetail.forStatusAndDetail(status, message));
+    }
+}
