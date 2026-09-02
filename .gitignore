@@ -69,3 +69,6 @@ ENV/
 *.rar
 *.tar
 *.zip
+
+# Kubernetes secret file
+k8s/secret.yaml

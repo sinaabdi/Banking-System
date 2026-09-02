@@ -199,3 +199,43 @@ placeholders rather than the previously-hardcoded `localhost:5432`: the defaults
 service_healthy` rather than a bare `depends_on` - a container starting isn't the same moment as
 Postgres actually accepting connections (especially on a first run, before `initdb` finishes), and
 Spring Boot doesn't retry a failed initial datasource connection.
+
+## Kubernetes Deployment
+
+`k8s/` holds the manifests for a `banking` namespace containing:
+
+- **`banking-config`/`banking-secret`** - one shared `ConfigMap`/`Secret` for both pods below, since
+  Postgres and the app need the same values from opposite sides of the same connection. Each side
+  maps a key to its own env var name via `valueFrom.configMapKeyRef`/`secretKeyRef` - e.g. the
+  Postgres pod's `POSTGRES_DB` env var reads the `ConfigMap`'s `DB_NAME` key, the same key the app
+  reads as `DB_NAME` directly. `secret.yaml` is gitignored (base64 is encoding, not encryption -
+  committing it would be no different from committing `.env`); only a shared `config.yaml` is
+  tracked.
+- **`postgres`** - a single-replica `Deployment` (a real DB doesn't need `StatefulSet`'s
+  ordered-scaling guarantees at this scale) backed by a `PersistentVolumeClaim` (minikube's default
+  storage class auto-provisions it, tied to whichever node the provisioner runs on - fine for a
+  learning cluster, not a production storage story), fronted by a `Service` **named `postgres`**.
+  That exact name is what makes `DB_URL=postgres` (the same value already used for Docker Compose)
+  resolve correctly via Kubernetes' internal DNS, with zero app-side changes from the Docker stage.
+- **`core`** - the app `Deployment`, 2 replicas (scheduled across the two worker nodes, demonstrating
+  the cluster actually load-balancing rather than just running single-node), exposed via a `NodePort`
+  `Service`. `imagePullPolicy: Never` on the container, since the image is loaded locally
+  (`minikube image load`) rather than pulled from a registry - the default policy for an untagged/
+  `:latest` image is `Always`, which would otherwise send kubelet looking for it on Docker Hub and
+  fail permanently.
+
+**Health probes**: added `spring-boot-starter-actuator` with
+`management.endpoint.health.probes.enabled=true`, which exposes two Kubernetes-specific endpoints -
+`/actuator/health/liveness` ("is this instance fundamentally broken, kill and restart it") and
+`/actuator/health/readiness` ("can this instance currently serve traffic", reflecting real dependency
+state like Postgres reachability, not just "the JVM didn't crash"). Both are permitted in
+`SecurityConfig` alongside `/api/auth/**`, since the kubelet calling them has no JWT to send.
+
+**Image distribution to a multi-node cluster**: `eval $(minikube docker-env)` only points at one
+node's Docker daemon, insufficient for a multi-node cluster - `minikube image load` is the tool that
+actually loads a locally-built image onto every node.
+
+**Host access on the `docker` driver**: unlike a Linux-native setup, `NodePort`/node-IP access isn't
+directly routable from the host on Windows/WSL with the `docker` driver - `minikube service <name>
+--url` opens an active tunnel process (must stay running) rather than just printing a static URL.
+This is a property of the driver/host combination, not something fixed by the cluster configuration.

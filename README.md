@@ -14,8 +14,10 @@ authentication/authorization - see [architucture.md](architucture.md).
 - PostgreSQL, via Flyway migrations
 - JWT auth (`io.jsonwebtoken`), BCrypt password hashing
 - springdoc-openapi (Swagger UI)
+- Spring Boot Actuator (Kubernetes liveness/readiness probes)
 - JUnit 5 + Mockito for unit tests, a `@SpringBootTest` integration test against a real Postgres
   instance for the concurrency guarantees Mockito alone can't prove
+- Docker (multi-stage build) + Kubernetes manifests for deployment
 
 ## Running it locally
 
@@ -53,9 +55,43 @@ The containerized app gets its datasource settings from the `.env` file at the r
 (`DB_URL=postgres` - Compose's internal DNS resolves that to the Postgres container) instead of
 `application.properties`'s `localhost` defaults, which stay in place for `./gradlew bootRun`.
 
+## Running it on Kubernetes
+
+The manifests in [k8s/](k8s/) deploy the same app + Postgres onto any cluster - developed and tested
+against a local [minikube](https://minikube.sigs.k8s.io/) cluster (`docker` driver).
+
+**1. Build the image and load it into the cluster** (minikube doesn't see your local Docker images by
+default - `minikube image load` copies it in):
+```bash
+docker build -t banking-core:local .
+minikube image load banking-core:local
+```
+
+**2. Create `k8s/secret.yaml`** - it's gitignored on purpose (base64 isn't encryption; see
+[architucture.md](architucture.md#kubernetes-deployment)), so it isn't in the repo. Create it
+yourself with a `DB_USERNAME`, `DB_PASSWORD`, and `JWT_SECRET` key - matching the shape of
+`k8s/config.yaml` alongside it.
+
+**3. Apply everything and check it's healthy**:
+```bash
+kubectl apply -f k8s/
+kubectl get pods,svc -n banking
+```
+Both `core` pods should reach `1/1 Running` - that specifically means their readiness probe
+(`/actuator/health/readiness`) already succeeded, which only happens once the app has confirmed it
+can reach Postgres.
+
+**4. Reach it from outside the cluster.** On the `docker` driver, a `NodePort` isn't directly
+reachable from the host - you need an active tunnel:
+```bash
+minikube service core -n banking --url
+```
+Leave that running, and use the URL it prints from a **second terminal of the same kind** (both
+native Windows, or both WSL - mixing the two can silently fail to connect).
+
 ## Configuration
 
-`application.properties` ships with a working local JWT secret (`jwt.secret`) and a 1-hour expiry (`jwt.expiration-ms`) so the app runs out of the box. **The committed secret is for local development only** - in any shared or deployed environment, this should come from an environment variable or a secrets manager instead, never from a file checked into version control.
+`application.properties` ships with a working local JWT secret (`jwt.secret`) and a 1-hour expiry (`jwt.expiration-ms`) so the app runs out of the box. **The committed secret is for local development only** - in any shared or deployed environment, this should come from an environment variable or a secrets manager instead, never from a file checked into version control. (This is exactly what the Kubernetes deployment above does - `JWT_SECRET` comes from `k8s/secret.yaml`, overriding the committed default.)
 
 ## Authentication quick start
 
