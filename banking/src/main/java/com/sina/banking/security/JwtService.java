@@ -23,7 +23,7 @@ public class JwtService {
 
     private static final Logger log = LoggerFactory.getLogger(JwtService.class);
 
-    @Value("${jwt.sercet}")
+    @Value("${jwt.secret}")
     private String secret;
 
     @Value("${jwt.expiration-ms}")

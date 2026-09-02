@@ -61,6 +61,7 @@ public class SecurityConfig {
                             // you are before you have an account. Only POST: listing/managing
                             // existing users stays behind authentication.
                             .requestMatchers(HttpMethod.POST, "/api/users").permitAll()
+                                .requestMatchers("/actuator/health/liveness", "/actuator/health/readiness", "/actuator/health").permitAll()
                             .anyRequest().authenticated())
                 .authenticationProvider(authenticationProvider())
                 // Runs before Spring's own form-login filter, so a valid Bearer token
