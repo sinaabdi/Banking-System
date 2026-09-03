@@ -8,7 +8,7 @@ target/
 # Gradle
 .gradle/
 gradle-app.setting
-!banking/gradle/wrapper/gradle-wrapper.jar
+!gradle/wrapper/gradle-wrapper.jar
 
 # Maven (harmless to keep even if you're on Gradle, in case you ever mix)
 .mvn/
@@ -49,6 +49,6 @@ docker-compose*.yml
 .dockerignore
 
 # Tests and docs — not needed at runtime
-banking/src/test/
+src/test/
 *.md
 docs/

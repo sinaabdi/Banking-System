@@ -47,6 +47,11 @@ spec:
                 configMapKeyRef:
                   key: DB_NAME
                   name: banking-config
+            - name: NOTIFICATION_SERVICE_URL
+              valueFrom:
+                configMapKeyRef:
+                  key: NOTIFICATION_SERVICE_URL
+                  name: banking-config
             - name: DB_USERNAME
               valueFrom:
                 secretKeyRef:

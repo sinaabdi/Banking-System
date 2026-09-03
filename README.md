@@ -49,7 +49,7 @@ Alternatively, run the whole stack - app and Postgres - in containers, no local 
 ```bash
 docker compose up --build
 ```
-This builds the app image from the repo-root `Dockerfile` (a multi-stage build: compile with the JDK,
+This builds the app image from the repo-root `Dockerfile_core` (a multi-stage build: compile with the JDK,
 run with just a JRE), starts Postgres, waits for it to actually be ready to accept connections (not
 just for its container to start), then starts the app. The API is up at `http://localhost:8080`,
 same as the local workflow.

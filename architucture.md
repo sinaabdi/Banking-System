@@ -178,7 +178,7 @@ A single `GlobalExceptionHandler` maps exceptions to HTTP responses: `NoSuchElem
 
 ## Containerization
 
-The `Dockerfile` (repo root) is a two-stage build:
+The `Dockerfile_core` (repo root) is a two-stage build:
 1. **`builder`** (`eclipse-temurin:25-jdk-*`) - copies the Gradle wrapper and `build.gradle` first and
    resolves dependencies before copying `src/`, so editing source code doesn't invalidate the
    dependency-download layer on rebuild. Then runs `./gradlew bootJar`.

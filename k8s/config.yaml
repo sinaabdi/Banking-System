@@ -7,3 +7,4 @@ data:
   DB_URL: postgres
   DB_PORT: "5432"
   DB_NAME: core_banking
+  NOTIFICATION_SERVICE_URL: http://notification:9090
