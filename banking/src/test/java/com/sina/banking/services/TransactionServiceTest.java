@@ -2,6 +2,7 @@ package com.sina.banking.services;
 
 import com.sina.banking.DTOs.TransactionDTOs.ReverseTransactionRequest;
 import com.sina.banking.DTOs.TransactionDTOs.TransferRequest;
+import com.sina.banking.events.TransactionPostedEvent;
 import com.sina.banking.DTOs.TransactionDTOs.TransactionResponse;
 import com.sina.banking.DTOs.TransactionDTOs.CreateTransactionRequest;
 import com.sina.banking.models.*;
@@ -15,6 +16,7 @@ import org.mockito.ArgumentCaptor;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.security.access.AccessDeniedException;
 
 import java.util.ArrayList;
@@ -39,6 +41,8 @@ public class TransactionServiceTest {
     private LedgerEntryRepository ledgerEntryRepository;
     @Mock
     private AccountRepository accountRepository;
+    @Mock
+    private ApplicationEventPublisher publisher;
 
     @InjectMocks
     private TransactionService transactionService;
@@ -98,6 +102,13 @@ public class TransactionServiceTest {
 
         LedgerEntry creditEntry = entries.stream().filter(e -> e.getDirection() == TransactionDirection.CREDIT).findFirst().orElseThrow();
         LedgerEntry debitEntry = entries.stream().filter(e -> e.getDirection() == TransactionDirection.DEBIT).findFirst().orElseThrow();
+
+        
+        ArgumentCaptor<TransactionPostedEvent> eventCaptor = ArgumentCaptor.forClass(TransactionPostedEvent.class);
+        verify(publisher).publishEvent(eventCaptor.capture());
+
+        assertThat(eventCaptor.getValue().type()).isEqualTo(TransactionType.DEPOSIT);
+        assertThat(eventCaptor.getValue().status()).isEqualTo(TransactionStatus.POSTED);
 
         assertThat(creditEntry.getAccount()).isEqualTo(account);
         assertThat(creditEntry.getAmount()).isEqualTo(100L);
@@ -246,6 +257,12 @@ public class TransactionServiceTest {
 
         LedgerEntry creditEntry = entries.stream().filter(e -> e.getDirection() == TransactionDirection.CREDIT).findFirst().orElseThrow();
         LedgerEntry debitEntry = entries.stream().filter(e -> e.getDirection() == TransactionDirection.DEBIT).findFirst().orElseThrow();
+
+        ArgumentCaptor<TransactionPostedEvent> eventCaptor = ArgumentCaptor.forClass(TransactionPostedEvent.class);
+        verify(publisher).publishEvent(eventCaptor.capture());
+
+        assertThat(eventCaptor.getValue().type()).isEqualTo(TransactionType.WITHDRAWAL);
+        assertThat(eventCaptor.getValue().status()).isEqualTo(TransactionStatus.POSTED);
 
         assertThat(debitEntry.getAccount()).isEqualTo(account);
         assertThat(debitEntry.getAmount()).isEqualTo(100L);
@@ -427,6 +444,12 @@ public class TransactionServiceTest {
 
         LedgerEntry creditEntry = entries.stream().filter(e -> e.getDirection() == TransactionDirection.CREDIT).findFirst().orElseThrow();
         LedgerEntry debitEntry = entries.stream().filter(e -> e.getDirection() == TransactionDirection.DEBIT).findFirst().orElseThrow();
+
+        ArgumentCaptor<TransactionPostedEvent> eventCaptor = ArgumentCaptor.forClass(TransactionPostedEvent.class);
+        verify(publisher).publishEvent(eventCaptor.capture());
+
+        assertThat(eventCaptor.getValue().type()).isEqualTo(TransactionType.TRANSFER);
+        assertThat(eventCaptor.getValue().status()).isEqualTo(TransactionStatus.POSTED);
 
         assertThat(debitEntry.getAccount()).isEqualTo(account);
         assertThat(creditEntry.getAccount()).isEqualTo(transferToAccount);
@@ -668,6 +691,12 @@ public class TransactionServiceTest {
 
         LedgerEntry flippedCredit = entries.stream().filter(e -> e.getAccount() == account).findFirst().orElseThrow();
         LedgerEntry flippedDebit = entries.stream().filter(e -> e.getAccount() == systemAccount).findFirst().orElseThrow();
+
+        ArgumentCaptor<TransactionPostedEvent> eventCaptor = ArgumentCaptor.forClass(TransactionPostedEvent.class);
+        verify(publisher).publishEvent(eventCaptor.capture());
+
+        assertThat(eventCaptor.getValue().type()).isEqualTo(TransactionType.REVERSAL);
+        assertThat(eventCaptor.getValue().status()).isEqualTo(TransactionStatus.POSTED);
 
         assertThat(flippedCredit.getDirection()).isEqualTo(TransactionDirection.DEBIT);
         assertThat(flippedDebit.getDirection()).isEqualTo(TransactionDirection.CREDIT);

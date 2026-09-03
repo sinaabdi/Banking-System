@@ -2,8 +2,10 @@
 
 A double-entry bookkeeping banking API, built with Spring Boot as a learning project - Phase 1 of a
 longer-term plan toward a polyglot microservices system (Go/Rust/Python, Redis, MQ, Kubernetes,
-GitOps CI/CD). This phase covers a single monolithic service: users, accounts, deposits/withdrawals/
-transfers/reversals, JWT authentication, and role/ownership-based authorization.
+GitOps CI/CD). Phase 1 covers a single monolithic service: users, accounts, deposits/withdrawals/
+transfers/reversals, JWT authentication, and role/ownership-based authorization. Phase 2 is underway -
+Docker/Kubernetes deployment, and a first companion microservice in Go (see
+[Notification service](#notification-service) below) that the main app talks to over HTTP.
 
 For the design decisions behind how this is built - the ledger model, concurrency strategy, and
 authentication/authorization - see [architucture.md](architucture.md).
@@ -18,6 +20,7 @@ authentication/authorization - see [architucture.md](architucture.md).
 - JUnit 5 + Mockito for unit tests, a `@SpringBootTest` integration test against a real Postgres
   instance for the concurrency guarantees Mockito alone can't prove
 - Docker (multi-stage build) + Kubernetes manifests for deployment
+- Go 1.25 (standard library only) - a companion notification service
 
 ## Running it locally
 
@@ -89,6 +92,26 @@ minikube service core -n banking --url
 Leave that running, and use the URL it prints from a **second terminal of the same kind** (both
 native Windows, or both WSL - mixing the two can silently fail to connect).
 
+## Notification service
+
+[notification-service/](notification-service/) is a small standalone Go service (standard library
+only, no framework) that the banking app calls whenever a transaction posts (deposit/withdraw/
+transfer/reversal). It's a real, independent second service - run it on its own:
+```bash
+cd notification-service
+go run main.go
+```
+It listens on `:9090` with two endpoints: `POST /notifications` (records one, logs it, returns 201)
+and `GET /notifications` (lists everything received so far - the easiest way to verify the flow end
+to end). The banking app finds it via `notification.service.url`
+(`application.properties`, defaults to `http://localhost:9090`).
+
+This call is deliberately **fire-and-forget**: the banking app publishes an event only after its own
+database transaction commits, a listener reacts to that event with a short-timeout HTTP call, and any
+failure is caught and logged rather than propagated - a deposit/withdrawal/transfer always succeeds or
+fails on its own merits, regardless of whether this service happens to be up. See
+[architucture.md](architucture.md#notification-service) for the full design reasoning.
+
 ## Configuration
 
 `application.properties` ships with a working local JWT secret (`jwt.secret`) and a 1-hour expiry (`jwt.expiration-ms`) so the app runs out of the box. **The committed secret is for local development only** - in any shared or deployed environment, this should come from an environment variable or a secrets manager instead, never from a file checked into version control. (This is exactly what the Kubernetes deployment above does - `JWT_SECRET` comes from `k8s/secret.yaml`, overriding the committed default.)
@@ -137,6 +160,10 @@ banking/src/main/java/com/sina/banking/
   configuration/    Spring Security configuration
   DTOs/             request/response records
   errors/           centralized exception -> HTTP status mapping
+  events/           transaction-posted event + the listener that notifies notification-service
 banking/src/main/resources/db/migration/   Flyway migrations
 banking/src/test/java/...                  unit tests (Mockito) + one concurrency integration test
+
+notification-service/
+  main.go   Go notification service - in-memory store, POST/GET /notifications
 ```

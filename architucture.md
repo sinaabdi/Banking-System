@@ -239,3 +239,45 @@ actually loads a locally-built image onto every node.
 directly routable from the host on Windows/WSL with the `docker` driver - `minikube service <name>
 --url` opens an active tunnel process (must stay running) rather than just printing a static URL.
 This is a property of the driver/host combination, not something fixed by the cluster configuration.
+
+## Notification Service
+
+The first genuinely polyglot piece: [notification-service/](notification-service/) is a standalone Go
+service, called by the Java app whenever a transaction posts. This is a synchronous REST call today,
+not a message queue - a believable stepping stone toward introducing one later without a rewrite.
+
+**Event flow (Java side)**: `TransactionService`'s `deposit`/`withdraw`/`transfer`/`reverse` each
+publish a `TransactionPostedEvent` (via `ApplicationEventPublisher`) immediately after
+`transaction.postedTransaction()` - for `reverse`, this is the newly-posted *reversal* transaction,
+not the original being marked `REVERSED`. `TransactionNotificationListener` (`events/` package)
+consumes it via `@TransactionalEventListener(phase = TransactionPhase.AFTER_COMMIT)`, not a plain
+`@EventListener`:
+
+- **Why `AFTER_COMMIT` specifically**: publishing inside the same `@Transactional` method and reacting
+  to it immediately would mean the HTTP call happens *while* the DB transaction (and, for
+  `withdraw`/`transfer`, its row locks) is still open - slow or unavailable, it holds up the lock; and
+  if the transaction then rolled back for an unrelated reason, a notification would already have gone
+  out for data that never actually committed. `AFTER_COMMIT` guarantees the listener only runs once the
+  change is durably saved.
+- **Why the call is fire-and-forget**: a notification is a side effect, not part of the banking
+  domain's correctness - `RestClient` is built once (constructor injection, not rebuilt per call) with
+  a short (~2s) connect/read timeout, and the whole call is wrapped in try/catch that logs and swallows
+  any failure rather than rethrowing. A deposit succeeds or fails on its own merits regardless of
+  whether this service is reachable - verified directly by stopping the Go service and confirming a
+  deposit still returns normally.
+- **Field-name bridging**: the outgoing payload is a separate `NotificationRequest` record, not the
+  event itself reused - Go's struct expects `snake_case` keys (`transaction_id`), so the mismatched
+  field is annotated `@JsonProperty("transaction_id")` on that DTO rather than on the event (the enum
+  fields `type`/`status` need no annotation - Jackson serializes an enum as its `name()` by default).
+
+**The Go service itself**: standard library only (`net/http`'s Go 1.22+ pattern-based `ServeMux`, e.g.
+`mux.HandleFunc("POST /notifications", ...)` - no framework needed at this size), storing notifications
+in a package-level slice guarded by a `sync.Mutex` (Go's HTTP server runs each request on its own
+goroutine, so the shared slice needs explicit protection on every read *and* write). `POST
+/notifications` assigns an id + timestamp, stores, logs to stdout as the stand-in for actually sending
+something, returns 201; `GET /notifications` lists everything received - the way to verify the flow
+end to end without a database.
+
+**Config**: `notification.service.url` (`application.properties`, defaults to
+`http://localhost:9090`) - not yet wired into `docker-compose.yml`/`k8s/`; both currently only cover
+the Java app + Postgres.

@@ -4,12 +4,14 @@ import com.sina.banking.DTOs.TransactionDTOs.ReverseTransactionRequest;
 import com.sina.banking.DTOs.TransactionDTOs.TransferRequest;
 import com.sina.banking.DTOs.TransactionDTOs.TransactionResponse;
 import com.sina.banking.DTOs.TransactionDTOs.CreateTransactionRequest;
+import com.sina.banking.events.TransactionPostedEvent;
 import com.sina.banking.models.*;
 import com.sina.banking.repositories.AccountRepository;
 import com.sina.banking.repositories.LedgerEntryRepository;
 import com.sina.banking.repositories.TransactionRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.security.access.AccessDeniedException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -26,13 +28,16 @@ public class TransactionService {
     private final TransactionRepository transactionRepository;
     private  final LedgerEntryRepository ledgerEntryRepository;
     private final AccountRepository accountRepository;
+    private final ApplicationEventPublisher publisher;
 
     public TransactionService(TransactionRepository transactionRepository,
                               LedgerEntryRepository ledgerEntryRepository,
-                              AccountRepository accountRepository) {
+                              AccountRepository accountRepository,
+                              ApplicationEventPublisher publisher) {
         this.transactionRepository = transactionRepository;
         this.ledgerEntryRepository = ledgerEntryRepository;
         this.accountRepository = accountRepository;
+        this.publisher = publisher;
     }
 
     @Transactional
@@ -82,6 +87,7 @@ public class TransactionService {
         ledgerEntryRepository.save(debitEntry);
 
         transaction.postedTransaction();
+        publisher.publishEvent(new TransactionPostedEvent(transaction.getId(), transaction.getType(), transaction.getStatus()));
 
         log.info("Posted deposit transaction id={} accountId={} cashAccountId={} amount={} currency={}",
                 transaction.getId(), destinationAccount.getId(), cashAccount.getId(), request.amount(), request.currency());
@@ -141,6 +147,7 @@ public class TransactionService {
         ledgerEntryRepository.save(creditEntry);
 
         transaction.postedTransaction();
+        publisher.publishEvent(new TransactionPostedEvent(transaction.getId(), transaction.getType(), transaction.getStatus()));
 
         log.info("Posted withdraw transaction id={} accountId={} cashAccountId={} amount={} currency={}",
                 transaction.getId(), destinationAccount.getId(), cashAccount.getId(), request.amount(), request.currency());
@@ -214,6 +221,7 @@ public class TransactionService {
         ledgerEntryRepository.save(creditEntry);
 
         transaction.postedTransaction();
+        publisher.publishEvent(new TransactionPostedEvent(transaction.getId(), transaction.getType(), transaction.getStatus()));
 
         log.info("Posted transfer transaction id={} from accountId={} to AccountId={} amount={} currency={}",
                 transaction.getId(), fromAccount.getId(), toAccount.getId(), request.amount(), request.currency());
@@ -280,6 +288,7 @@ public class TransactionService {
 
         reverseTransaction.postedTransaction();
         transaction.markStatusReversed();
+        publisher.publishEvent(new TransactionPostedEvent(reverseTransaction.getId(), reverseTransaction.getType(), reverseTransaction.getStatus()));
 
         log.info("Posted reverse transaction id={} originalTransactionId={} entriesReversed={}",
                 reverseTransaction.getId(), transaction.getId(), ledgerEntries.size());
