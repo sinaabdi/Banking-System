@@ -249,7 +249,7 @@ not a message queue - a believable stepping stone toward introducing one later w
 **Event flow (Java side)**: `TransactionService`'s `deposit`/`withdraw`/`transfer`/`reverse` each
 publish a `TransactionPostedEvent` (via `ApplicationEventPublisher`) immediately after
 `transaction.postedTransaction()` - for `reverse`, this is the newly-posted *reversal* transaction,
-not the original being marked `REVERSED`. `TransactionNotificationListener` (`events/` package)
+not the original being marked `REVERSED`. `TransactionEventPublisher` (`events/` package)
 consumes it via `@TransactionalEventListener(phase = TransactionPhase.AFTER_COMMIT)`, not a plain
 `@EventListener`:
 
