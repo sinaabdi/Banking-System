@@ -2,8 +2,10 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
+	"os"
 	"sync"
 	"time"
 
@@ -27,17 +29,25 @@ var (
 
 func main() {
 
-	amqpURL  := "amqp://guest:guest@localhost:5672/"
-	notificationQueueName := "notification.transaction-events"
-	bankingExchangeName := "banking.transaction-events"
+	rabbitURL := getRabbitMQURL()
+
+	notificationQueueName := os.Getenv("NOTIFICATION_QUEUE_NAME")
+	if notificationQueueName == "" {
+		notificationQueueName = "notification.transaction-events"
+	}
+
+	bankingExchangeName := os.Getenv("FANOUT_EXCHANGE_NAME")
+	if bankingExchangeName == "" {
+		bankingExchangeName = "banking.transaction-events"
+	}
 
 	// Create a connection to RabbitMQ
-	conn, err := amqp.Dial(amqpURL )
+	conn, err := amqp.Dial(rabbitURL)
 	if err != nil {
 		log.Fatalf("failed to connect to RabbitMQ: %v", err)
 	}
 	defer conn.Close()
-	log.Printf("Connected to RabbitMQ at %s", amqpURL )
+	log.Printf("Connected to RabbitMQ at %s", rabbitURL)
 
 	// Open a channel
 	ch, err := conn.Channel()
@@ -147,4 +157,28 @@ func listHandler(writer http.ResponseWriter, request *http.Request) {
 		http.Error(writer, err.Error(), http.StatusInternalServerError)
 		return
 	}
+}
+
+func getRabbitMQURL() string {
+	host := os.Getenv("RABBITMQ_HOST")
+	if host == "" {
+		host = "localhost"
+	}
+
+	port := os.Getenv("RABBITMQ_PORT")
+	if port == "" {
+		port = "5672"
+	}
+
+	username := os.Getenv("RABBITMQ_USERNAME")
+	if username == "" {
+		username = "guest"
+	}
+
+	password := os.Getenv("RABBITMQ_PASSWORD")
+	if password == "" {
+		password = "guest"
+	}
+
+	return fmt.Sprintf("amqp://%s:%s@%s:%s", username, password, host, port) // amqp://guest:guest@localhost:5672/
 }

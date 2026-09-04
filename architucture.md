@@ -178,7 +178,13 @@ A single `GlobalExceptionHandler` maps exceptions to HTTP responses: `NoSuchElem
 
 ## Containerization
 
-The `Dockerfile_core` (repo root) is a two-stage build:
+Each service has its own `Dockerfile`, colocated in its own directory (`banking/Dockerfile`,
+`notification-service/Dockerfile`) with its own `.dockerignore`, not one shared root-level Dockerfile
+per service distinguished by suffix. This scales better as more services get added, and it means each
+service's `docker-compose.yml` `build.context` points at that service's own directory, so its
+Dockerfile's `COPY` paths are relative to itself rather than the repo root.
+
+`banking/Dockerfile` is a two-stage build:
 1. **`builder`** (`eclipse-temurin:25-jdk-*`) - copies the Gradle wrapper and `build.gradle` first and
    resolves dependencies before copying `src/`, so editing source code doesn't invalidate the
    dependency-download layer on rebuild. Then runs `./gradlew bootJar`.
@@ -186,19 +192,25 @@ The `Dockerfile_core` (repo root) is a two-stage build:
    `COPY --from=builder`. No JDK, no Gradle, no source ever reaches this image - just a JRE and one
    jar.
 
-`docker-compose.yml` runs this alongside Postgres, both on a `backend` bridge network so Compose's
-internal DNS resolves the service name `postgres` to the database container - unlike the host
-workflow, `localhost` inside `core`'s container means the container itself, not the database.
+`notification-service/Dockerfile` follows the same shape with Go's toolchain instead: a
+`golang:*-alpine` builder stage runs `go build`, and a bare `alpine` runtime stage copies out just the
+compiled binary - no Go toolchain or source in the final image either.
 
-This is why `application.properties`'s datasource settings are `${DB_URL:localhost}`-style
-placeholders rather than the previously-hardcoded `localhost:5432`: the defaults keep
-`./gradlew bootRun` working unchanged on the host, while `core`'s `env_file: .env` overrides
-`DB_URL`/`DB_PORT`/`DB_USERNAME`/`DB_PASSWORD`/`DB_NAME` to point at the `postgres` service instead.
+`docker-compose.yml` runs `core`, `notification`, `postgres`, and `rabbitmq` together, all on a
+`backend` bridge network so Compose's internal DNS resolves each by service name - unlike the host
+workflow, `localhost` inside any one container means that container itself, not any of the others.
 
-`postgres` has a `pg_isready` healthcheck, and `core` declares `depends_on: postgres: condition:
-service_healthy` rather than a bare `depends_on` - a container starting isn't the same moment as
-Postgres actually accepting connections (especially on a first run, before `initdb` finishes), and
-Spring Boot doesn't retry a failed initial datasource connection.
+This is why `application.properties`'s datasource/RabbitMQ settings are `${DB_URL:localhost}`-style
+placeholders (and, on the Go side, `os.Getenv` with a hardcoded fallback, since Go has no built-in
+placeholder syntax) rather than anything hardcoded: the defaults keep `./gradlew bootRun`/
+`go run main.go` working unchanged on the host, while each container's `env_file: .env` overrides them
+to point at the right service names instead.
+
+`postgres` and `rabbitmq` each have their own healthcheck (`pg_isready`, `rabbitmq-diagnostics ping`),
+and `core`/`notification` declare `depends_on: <service>: condition: service_healthy` rather than a
+bare `depends_on` - a container starting isn't the same moment as the thing inside it actually being
+ready to accept connections (especially on a first run), and neither Spring Boot nor the Go program
+retries a failed initial connection.
 
 ## Kubernetes Deployment
 
@@ -222,7 +234,22 @@ Spring Boot doesn't retry a failed initial datasource connection.
   `Service`. `imagePullPolicy: Never` on the container, since the image is loaded locally
   (`minikube image load`) rather than pulled from a registry - the default policy for an untagged/
   `:latest` image is `Always`, which would otherwise send kubelet looking for it on Docker Hub and
-  fail permanently.
+  fail permanently. Its `env` also carries `RABBITMQ_HOST`/`RABBITMQ_PORT`/`RABBITMQ_USERNAME`/
+  `FANOUT_EXCHANGE_NAME` (from `banking-config`) and `RABBITMQ_PASSWORD` (from `banking-secret`).
+- **`rabbitmq`** - **`replicas: 1`, deliberately, not 2.** Unlike `core`/`notification`, RabbitMQ isn't
+  stateless - running 2 replicas via a plain `Deployment` with no clustering configuration would give
+  two completely independent, unconnected broker instances, each with their own separate exchanges and
+  queues. The `Service` in front would load-balance each new connection randomly between them, so
+  `core`'s publish and `notification`'s consume could easily land on *different* instances - a message
+  would then just silently never arrive, with no error anywhere. Real RabbitMQ clustering needs a
+  `StatefulSet`, stable per-pod identity, and a peer-discovery mechanism; none of that exists here, so
+  a single replica is the only correct choice at this scale - same reasoning as `postgres`. Backed by
+  its own `PersistentVolumeClaim` mounted at `/var/lib/rabbitmq/` - without it, a pod restart would wipe
+  every durable queue and anything waiting in it, defeating the entire point of the durability work in
+  [Notification Service](#notification-service) below.
+- **`notification`** - 2 replicas, `env` sourced the same way as `core`'s RabbitMQ settings, plus
+  `NOTIFICATION_QUEUE_NAME`. No `PersistentVolumeClaim` - it's stateless (an in-memory store), same as
+  `core`.
 
 **Health probes**: added `spring-boot-starter-actuator` with
 `management.endpoint.health.probes.enabled=true`, which exposes two Kubernetes-specific endpoints -
@@ -240,44 +267,90 @@ directly routable from the host on Windows/WSL with the `docker` driver - `minik
 --url` opens an active tunnel process (must stay running) rather than just printing a static URL.
 This is a property of the driver/host combination, not something fixed by the cluster configuration.
 
+**`imagePullPolicy: Never` doesn't guarantee a rebuild actually takes effect**: `minikube image load`
+can silently fail to refresh an already-loaded tag while a pod is still running on it. The reliable
+sequence is scale the deployment to 0 first (so nothing holds the old image), remove it on each node
+(`minikube ssh -n <node> -- docker rmi <image>:local`), reload, then scale back up.
+
+**A brand-new RabbitMQ can drop its very first message** - encountered directly while first deploying
+this: the exchange is only created lazily on `core`'s first publish, and `notification`'s queue is only
+bound to it during `notification`'s own startup. On a truly fresh PVC, if the first publish happens
+before the first successful bind, the message has nowhere to go - a fanout exchange doesn't buffer for
+queues that don't exist yet at publish time. This can't recur once both exist (they're durable), so
+it's a one-time concern specific to a brand-new environment, not an ongoing reliability gap.
+
 ## Notification Service
 
 The first genuinely polyglot piece: [notification-service/](notification-service/) is a standalone Go
-service, called by the Java app whenever a transaction posts. This is a synchronous REST call today,
-not a message queue - a believable stepping stone toward introducing one later without a rewrite.
+service that reacts to every posted transaction, over **RabbitMQ**. This started as a direct
+synchronous HTTP call and was deliberately migrated to a message broker specifically to support more
+than one independent consumer of the same event (a planned fraud/risk-scoring service is next) without
+`core` ever needing to know how many consumers exist.
 
 **Event flow (Java side)**: `TransactionService`'s `deposit`/`withdraw`/`transfer`/`reverse` each
 publish a `TransactionPostedEvent` (via `ApplicationEventPublisher`) immediately after
 `transaction.postedTransaction()` - for `reverse`, this is the newly-posted *reversal* transaction,
-not the original being marked `REVERSED`. `TransactionEventPublisher` (`events/` package)
-consumes it via `@TransactionalEventListener(phase = TransactionPhase.AFTER_COMMIT)`, not a plain
-`@EventListener`:
+not the original being marked `REVERSED`. `TransactionEventPublisher` (`events/` package, renamed from
+`TransactionNotificationListener` once its job stopped being "call notification-service specifically"
+and became "publish a domain event for whoever's listening") consumes it via
+`@TransactionalEventListener(phase = TransactionPhase.AFTER_COMMIT)`, not a plain `@EventListener`:
 
 - **Why `AFTER_COMMIT` specifically**: publishing inside the same `@Transactional` method and reacting
-  to it immediately would mean the HTTP call happens *while* the DB transaction (and, for
-  `withdraw`/`transfer`, its row locks) is still open - slow or unavailable, it holds up the lock; and
-  if the transaction then rolled back for an unrelated reason, a notification would already have gone
-  out for data that never actually committed. `AFTER_COMMIT` guarantees the listener only runs once the
-  change is durably saved.
-- **Why the call is fire-and-forget**: a notification is a side effect, not part of the banking
-  domain's correctness - `RestClient` is built once (constructor injection, not rebuilt per call) with
-  a short (~2s) connect/read timeout, and the whole call is wrapped in try/catch that logs and swallows
-  any failure rather than rethrowing. A deposit succeeds or fails on its own merits regardless of
-  whether this service is reachable - verified directly by stopping the Go service and confirming a
-  deposit still returns normally.
+  to it immediately would mean the broker call happens *while* the DB transaction (and, for
+  `withdraw`/`transfer`, its row locks) is still open; and if the transaction then rolled back for an
+  unrelated reason, an event would already have gone out for data that never actually committed.
+  `AFTER_COMMIT` guarantees the listener only runs once the change is durably saved.
+- **Fanout exchange, not direct/topic**: `RabbitMQConfig` declares a durable `FanoutExchange` named
+  `banking.transaction-events`. A fanout exchange forwards every published message to *every* queue
+  bound to it, ignoring routing keys entirely - exactly the shape needed for "N independent consumers,
+  each wants their own full copy of every event," as opposed to routing different message *categories*
+  to different places (what direct/topic exchanges are for). If `notification` and a future
+  fraud-scoring service both consumed from the *same* queue instead, RabbitMQ would split messages
+  between them (competing consumers - each message goes to exactly one consumer, right for scaling one
+  service horizontally, wrong for two different services that each need every message).
+- **Why the publish is still fire-and-forget**: an event is a side effect, not part of the banking
+  domain's correctness - `RabbitTemplate.convertAndSend(...)` is wrapped in try/catch that logs and
+  swallows any failure rather than rethrowing, same guarantee the old direct HTTP call had, just
+  protecting against a broker being unreachable instead of an HTTP endpoint. A deposit succeeds or
+  fails on its own merits regardless of RabbitMQ's availability.
+- **JSON over AMQP isn't automatic**: unlike `RestClient`, Spring AMQP's default `RabbitTemplate` only
+  serializes `String`/`byte[]`/`Serializable` payloads - a record like `NotificationRequest` isn't any
+  of those and gets rejected at send time with a clear error, not silently mishandled. Fixed by adding
+  a `Jackson2JsonMessageConverter`/`JacksonJsonMessageConverter` (the latter is this project's Spring
+  AMQP version's actual class name - the "2" suffix was dropped once Jackson 1.x support was removed)
+  bean; Spring Boot auto-wires it into the `RabbitTemplate` it builds once exactly one
+  `MessageConverter` bean exists.
 - **Field-name bridging**: the outgoing payload is a separate `NotificationRequest` record, not the
   event itself reused - Go's struct expects `snake_case` keys (`transaction_id`), so the mismatched
   field is annotated `@JsonProperty("transaction_id")` on that DTO rather than on the event (the enum
   fields `type`/`status` need no annotation - Jackson serializes an enum as its `name()` by default).
 
-**The Go service itself**: standard library only (`net/http`'s Go 1.22+ pattern-based `ServeMux`, e.g.
-`mux.HandleFunc("POST /notifications", ...)` - no framework needed at this size), storing notifications
-in a package-level slice guarded by a `sync.Mutex` (Go's HTTP server runs each request on its own
-goroutine, so the shared slice needs explicit protection on every read *and* write). `POST
-/notifications` assigns an id + timestamp, stores, logs to stdout as the stand-in for actually sending
-something, returns 201; `GET /notifications` lists everything received - the way to verify the flow
-end to end without a database.
+**The Go service itself**: its first real third-party dependency (`github.com/rabbitmq/amqp091-go`),
+replacing the stdlib-only approach used until this stage. On startup it connects, declares its own
+durable queue (`notification.transaction-events`), and binds it to the shared fanout exchange - then
+consumes in a dedicated goroutine, running concurrently with `http.ListenAndServe` (which blocks
+forever, so the consumer has to be a separate goroutine to run at all). Notifications are stored in the
+same package-level slice guarded by a `sync.Mutex` as before; `GET /notifications` (still there) lists
+everything received. `POST /notifications` is gone - messages arrive via the queue now, not an HTTP
+push.
 
-**Config**: `notification.service.url` (`application.properties`, defaults to
-`http://localhost:9090`) - not yet wired into `docker-compose.yml`/`k8s/`; both currently only cover
-the Java app + Postgres.
+- **Manual ack, not auto-ack**: `ch.Consume(..., autoAck=false, ...)`, with `msg.Ack(false)` called only
+  after a message is successfully stored. With auto-ack, RabbitMQ considers a message resolved the
+  instant it's delivered - if the consumer then crashed while handling it, the message would just be
+  gone. Manual ack means an unacknowledged message (consumer crashed, or never called `Ack`) goes back
+  to the queue for redelivery instead. (A real, encountered bug from getting this backwards:
+  `autoAck=true` *combined with* still calling `msg.Ack()` afterward is actually a protocol violation -
+  acking an already-auto-acked delivery gets the whole channel force-closed by the broker, silently
+  killing the consumer with no visible error after exactly one message.)
+- **Durability**: the exchange, the queue, and each published message are all separately marked
+  durable/persistent - all three have to agree for anything to survive a RabbitMQ restart. This is the
+  concrete improvement over the old HTTP design: previously, if `notification-service` was down, an
+  event was lost forever (a logged warning, nothing else); now it waits safely in the queue until a
+  consumer is available - proven directly by stopping the Go service, depositing, confirming the
+  deposit still succeeds, then restarting the service and watching it drain the backlog.
+
+**Config**: `RABBITMQ_HOST`/`RABBITMQ_PORT`/`RABBITMQ_USERNAME`/`RABBITMQ_PASSWORD` (Java:
+`application.properties`; Go: `os.Getenv` with hardcoded fallbacks, since Go has no built-in
+placeholder syntax) plus `FANOUT_EXCHANGE_NAME`/`NOTIFICATION_QUEUE_NAME`, all defaulting to
+`localhost`/dev credentials for the host workflow and overridden via `.env`/Kubernetes
+`ConfigMap`/`Secret` elsewhere - both `docker-compose.yml` and `k8s/` now fully cover this service.

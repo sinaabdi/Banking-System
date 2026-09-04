@@ -67,3 +67,28 @@ spec:
                 secretKeyRef:
                   key: JWT_SECRET
                   name: banking-secret
+            - name: RABBITMQ_HOST
+              valueFrom:
+                configMapKeyRef:
+                  key: RABBITMQ_HOST
+                  name: banking-config
+            - name: RABBITMQ_PORT
+              valueFrom:
+                configMapKeyRef:
+                  key: RABBITMQ_PORT
+                  name: banking-config
+            - name: RABBITMQ_USERNAME
+              valueFrom:
+                configMapKeyRef:
+                  key: RABBITMQ_USERNAME
+                  name: banking-config
+            - name: RABBITMQ_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  key: RABBITMQ_PASSWORD
+                  name: banking-secret
+            - name: FANOUT_EXCHANGE_NAME
+              valueFrom:
+                configMapKeyRef:
+                  key: FANOUT_EXCHANGE_NAME
+                  name: banking-config

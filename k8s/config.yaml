@@ -8,3 +8,8 @@ data:
   DB_PORT: "5432"
   DB_NAME: core_banking
   NOTIFICATION_SERVICE_URL: http://notification:9090
+  RABBITMQ_HOST: rabbitmq
+  RABBITMQ_PORT: "5672"
+  RABBITMQ_USERNAME: guest
+  FANOUT_EXCHANGE_NAME: banking.transaction-events
+  NOTIFICATION_QUEUE_NAME: notification.transaction-events
