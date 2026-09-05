@@ -51,11 +51,27 @@ services:
     networks:
       - backend
 
+  fraud:
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    build:
+      context: ./fraud-service
+      dockerfile: Dockerfile
+    ports:
+      - "9091:9091"
+    env_file:
+      - ".env"
+    networks:
+      - backend
+
   rabbitmq:
     image: rabbitmq:4-management
     ports:
       - "15672:15672"
       - "5672:5672"
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq/
     healthcheck:
       test: rabbitmq-diagnostics -q ping
       interval: 5s
@@ -66,6 +82,7 @@ services:
 
 volumes:
     postgres_data:
+    rabbitmq_data:
 
 networks:
   backend:

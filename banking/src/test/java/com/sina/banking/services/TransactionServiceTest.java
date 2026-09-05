@@ -49,6 +49,7 @@ public class TransactionServiceTest {
 
     private Account account;
     private User owner;
+    private User transferUser;
     private Account systemAccount;
     private Account transferToAccount;
     private CreateTransactionRequest request;
@@ -63,6 +64,10 @@ public class TransactionServiceTest {
         lenient().when(account.getUser()).thenReturn(owner);
         systemAccount = mock(Account.class);
         transferToAccount = mock(Account.class);
+        transferUser = mock(User.class);
+        lenient().when(transferUser.getId()).thenReturn(2);
+        lenient().when(transferToAccount.getUser()).thenReturn(transferUser);
+        lenient().when(systemAccount.getType()).thenReturn(AccountType.SYSTEM);
         request = new CreateTransactionRequest(
                 IDEMPOTENCY_KEY,
                 100L,
@@ -171,6 +176,7 @@ public class TransactionServiceTest {
     @Test
     void deposit_callerDepositWithAdminRole() {
         User someoneElse = mock(User.class);
+        LedgerEntry ledgerEntry = mock(LedgerEntry.class);
         lenient().when(someoneElse.getId()).thenReturn(999);
         lenient().when(account.getUser()).thenReturn(someoneElse);
         when(transactionRepository.findByIdempotencyKey(request.idempotencyKey())).thenReturn(Optional.empty());
@@ -667,6 +673,7 @@ public class TransactionServiceTest {
     void reverse_happyPath_postedTransactionAndCreateLedgerEntryForAllEntriesWithFlipDirection() {
         Transaction transaction = new Transaction(TransactionType.DEPOSIT, TransactionStatus.POSTED, "test-idem-123");
         transaction.setId(reverseRequest.transactionId());
+        when(account.getId()).thenReturn(1);
         LedgerEntry creditEntry = new LedgerEntry(transaction, account, TransactionDirection.CREDIT, 100L, "USD");
         LedgerEntry debitEntry = new LedgerEntry(transaction, systemAccount, TransactionDirection.DEBIT, 100L, "USD");
         List<LedgerEntry> ledgerEntries = new ArrayList<>(List.of(creditEntry, debitEntry));
@@ -697,6 +704,13 @@ public class TransactionServiceTest {
 
         assertThat(eventCaptor.getValue().type()).isEqualTo(TransactionType.REVERSAL);
         assertThat(eventCaptor.getValue().status()).isEqualTo(TransactionStatus.POSTED);
+        // The customer account (account) sits on the CREDIT side of the original deposit and the
+        // DEBIT side of its reversal - systemAccount is filtered out on both, so it must still
+        // resolve as the sole primary party regardless of which direction it ends up on.
+        assertThat(eventCaptor.getValue().accountId()).isEqualTo(account.getId());
+        assertThat(eventCaptor.getValue().userId()).isEqualTo(CALLER_ID);
+        assertThat(eventCaptor.getValue().counterpartyAccountId()).isNull();
+        assertThat(eventCaptor.getValue().counterpartyUserId()).isNull();
 
         assertThat(flippedCredit.getDirection()).isEqualTo(TransactionDirection.DEBIT);
         assertThat(flippedDebit.getDirection()).isEqualTo(TransactionDirection.CREDIT);

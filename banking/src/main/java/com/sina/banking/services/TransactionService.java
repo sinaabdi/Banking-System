@@ -16,6 +16,7 @@ import org.springframework.security.access.AccessDeniedException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.NoSuchElementException;
 import java.util.Optional;
@@ -87,7 +88,8 @@ public class TransactionService {
         ledgerEntryRepository.save(debitEntry);
 
         transaction.postedTransaction();
-        publisher.publishEvent(new TransactionPostedEvent(transaction.getId(), transaction.getType(), transaction.getStatus()));
+        TransactionPostedEvent event = buildPostedEvent(transaction, List.of(creditEntry, debitEntry));
+        publisher.publishEvent(event);
 
         log.info("Posted deposit transaction id={} accountId={} cashAccountId={} amount={} currency={}",
                 transaction.getId(), destinationAccount.getId(), cashAccount.getId(), request.amount(), request.currency());
@@ -147,7 +149,8 @@ public class TransactionService {
         ledgerEntryRepository.save(creditEntry);
 
         transaction.postedTransaction();
-        publisher.publishEvent(new TransactionPostedEvent(transaction.getId(), transaction.getType(), transaction.getStatus()));
+        TransactionPostedEvent event = buildPostedEvent(transaction, List.of(creditEntry, debitEntry));
+        publisher.publishEvent(event);
 
         log.info("Posted withdraw transaction id={} accountId={} cashAccountId={} amount={} currency={}",
                 transaction.getId(), destinationAccount.getId(), cashAccount.getId(), request.amount(), request.currency());
@@ -221,7 +224,8 @@ public class TransactionService {
         ledgerEntryRepository.save(creditEntry);
 
         transaction.postedTransaction();
-        publisher.publishEvent(new TransactionPostedEvent(transaction.getId(), transaction.getType(), transaction.getStatus()));
+        TransactionPostedEvent event = buildPostedEvent(transaction, List.of(creditEntry, debitEntry));
+        publisher.publishEvent(event);
 
         log.info("Posted transfer transaction id={} from accountId={} to AccountId={} amount={} currency={}",
                 transaction.getId(), fromAccount.getId(), toAccount.getId(), request.amount(), request.currency());
@@ -276,6 +280,7 @@ public class TransactionService {
         // Mirror every original entry onto the new transaction with direction flipped, so the
         // original and its reversal sum to zero once both exist. The original entries themselves
         // are never touched - the ledger is append-only.
+        List<LedgerEntry> reversalEntries = new ArrayList<>();
         for (LedgerEntry entry: ledgerEntries) {
             TransactionDirection direction = TransactionDirection.CREDIT;
             if (entry.getDirection().equals(direction)) {
@@ -284,11 +289,13 @@ public class TransactionService {
 
             LedgerEntry ledgerEntry = new LedgerEntry(reverseTransaction, entry.getAccount(), direction, entry.getAmount(), entry.getCurrency());
             ledgerEntryRepository.save(ledgerEntry);
+            reversalEntries.add(ledgerEntry);
         }
 
         reverseTransaction.postedTransaction();
         transaction.markStatusReversed();
-        publisher.publishEvent(new TransactionPostedEvent(reverseTransaction.getId(), reverseTransaction.getType(), reverseTransaction.getStatus()));
+        TransactionPostedEvent event = buildPostedEvent(reverseTransaction, reversalEntries);
+        publisher.publishEvent(event);
 
         log.info("Posted reverse transaction id={} originalTransactionId={} entriesReversed={}",
                 reverseTransaction.getId(), transaction.getId(), ledgerEntries.size());
@@ -358,5 +365,38 @@ public class TransactionService {
     private Account findAccountForUpdateOrElseThrow(Integer id) {
         return accountRepository.findByIdForUpdate(id)
                 .orElseThrow(() -> new NoSuchElementException("account does not exist:" + id));
+    }
+
+    private TransactionPostedEvent buildPostedEvent(Transaction transaction, List<LedgerEntry> ledgerEntryList) {
+        LedgerEntry primary;
+        LedgerEntry counterparty;
+        List<LedgerEntry> entries = ledgerEntryList.stream().filter(entry -> !AccountType.SYSTEM.equals(entry.getAccount().getType())).toList();
+
+        if (entries.size() == 1) {
+            primary = entries.getFirst();
+            counterparty = null;
+        } else if (entries.size() == 2) {
+            if (TransactionDirection.DEBIT.equals(entries.getFirst().getDirection())) {
+                primary = entries.get(0);
+                counterparty = entries.get(1);
+            } else {
+                primary = entries.get(1);
+                counterparty = entries.get(0);
+            }
+        } else {
+            throw new IllegalStateException("transaction id=" + transaction.getId() + " has illegal ledger entries");
+        }
+
+
+        return new TransactionPostedEvent(
+            transaction.getId(),
+            transaction.getType(),
+            transaction.getStatus(),
+                primary.getAmount(),
+                primary.getCurrency(),
+                primary.getAccount().getId(),
+                primary.getAccount().getUser().getId(),
+                counterparty == null ? null : counterparty.getAccount().getId(),
+                counterparty == null ? null : counterparty.getAccount().getUser().getId());
     }
 }

@@ -29,6 +29,52 @@ var (
 
 func main() {
 
+	log.Println("Connecting to the RabbitMQ...")
+	messages := connectToRabbitMQ()
+	log.Println("connected to the RabbitMQ successfully.")
+
+	// Runs concurrently with http.ListenAndServe below (which blocks forever) - this goroutine is
+	// what actually drains the queue, for as long as the process lives.
+	go func() {
+		for msg := range messages {
+			var n Notification
+			log.Printf("Received a message: %s", msg.Body)
+
+			if err := json.Unmarshal(msg.Body, &n); err != nil {
+				log.Printf("failed to decode the message: %v", err)
+				continue
+			}
+			if n.TransactionID <= 0 || n.Type == "" || n.Status == "" {
+				log.Printf("Error: all notification fields are require: %+v", n)
+				continue
+			}
+
+			mu.Lock()
+			n.ID = len(notificationQueue) + 1
+			n.ReceivedAt = time.Now()
+			notificationQueue = append(notificationQueue, n)
+			mu.Unlock()
+
+			log.Printf("sending notification id=%v", n.ID)
+
+			if err := msg.Ack(false); err != nil {
+				log.Printf("failed to set Ack: %v", err)
+				continue
+			}
+			log.Printf("Acked message for transactionId=%d", n.TransactionID)
+		}
+	}()
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /notifications", listHandler)
+
+	log.Println("Notification server listening on port 9090...")
+	if err := http.ListenAndServe(":9090", mux); err != nil {
+		log.Fatalf("notification server failed: %v", err)
+	}
+}
+
+func connectToRabbitMQ() <-chan amqp.Delivery {
 	rabbitURL := getRabbitMQURL()
 
 	notificationQueueName := os.Getenv("NOTIFICATION_QUEUE_NAME")
@@ -46,7 +92,6 @@ func main() {
 	if err != nil {
 		log.Fatalf("failed to connect to RabbitMQ: %v", err)
 	}
-	defer conn.Close()
 	log.Printf("Connected to RabbitMQ at %s", rabbitURL)
 
 	// Open a channel
@@ -54,7 +99,6 @@ func main() {
 	if err != nil {
 		log.Fatalf("failed to open a channel: %v", err)
 	}
-	defer ch.Close()
 
 	// Declare our own queue, durable so it and anything in it survives a RabbitMQ restart - this is
 	// what actually holds messages; the exchange below only ever routes them.
@@ -105,45 +149,7 @@ func main() {
 	}
 	log.Printf("Consumer registered on queue %s", q.Name)
 
-	// Runs concurrently with http.ListenAndServe below (which blocks forever) - this goroutine is
-	// what actually drains the queue, for as long as the process lives.
-	go func() {
-		for msg := range messages {
-			var n Notification
-			log.Printf("Received a message: %s", msg.Body)
-
-			if err := json.Unmarshal(msg.Body, &n); err != nil {
-				log.Printf("failed to decode the message: %v", err)
-				continue
-			}
-			if n.TransactionID <= 0 || n.Type == "" || n.Status == "" {
-				log.Printf("Error: all notification fields are require: %+v", n)
-				continue
-			}
-
-			mu.Lock()
-			n.ID = len(notificationQueue) + 1
-			n.ReceivedAt = time.Now()
-			notificationQueue = append(notificationQueue, n)
-			mu.Unlock()
-
-			log.Printf("sending notification id=%v", n.ID)
-
-			if err = msg.Ack(false); err != nil {
-				log.Printf("failed to set Ack: %v", err)
-				continue
-			}
-			log.Printf("Acked message for transactionId=%d", n.TransactionID)
-		}
-	}()
-
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /notifications", listHandler)
-
-	log.Println("Notification server listening on port 9090...")
-	if err := http.ListenAndServe(":9090", mux); err != nil {
-		log.Fatalf("notification server failed: %v", err)
-	}
+	return messages
 }
 
 func listHandler(writer http.ResponseWriter, request *http.Request) {

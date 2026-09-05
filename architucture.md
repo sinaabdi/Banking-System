@@ -314,13 +314,13 @@ and became "publish a domain event for whoever's listening") consumes it via
   protecting against a broker being unreachable instead of an HTTP endpoint. A deposit succeeds or
   fails on its own merits regardless of RabbitMQ's availability.
 - **JSON over AMQP isn't automatic**: unlike `RestClient`, Spring AMQP's default `RabbitTemplate` only
-  serializes `String`/`byte[]`/`Serializable` payloads - a record like `NotificationRequest` isn't any
+  serializes `String`/`byte[]`/`Serializable` payloads - a record like `TransactionEventPayload` isn't any
   of those and gets rejected at send time with a clear error, not silently mishandled. Fixed by adding
   a `Jackson2JsonMessageConverter`/`JacksonJsonMessageConverter` (the latter is this project's Spring
   AMQP version's actual class name - the "2" suffix was dropped once Jackson 1.x support was removed)
   bean; Spring Boot auto-wires it into the `RabbitTemplate` it builds once exactly one
   `MessageConverter` bean exists.
-- **Field-name bridging**: the outgoing payload is a separate `NotificationRequest` record, not the
+- **Field-name bridging**: the outgoing payload is a separate `TransactionEventPayload` record, not the
   event itself reused - Go's struct expects `snake_case` keys (`transaction_id`), so the mismatched
   field is annotated `@JsonProperty("transaction_id")` on that DTO rather than on the event (the enum
   fields `type`/`status` need no annotation - Jackson serializes an enum as its `name()` by default).

@@ -13,3 +13,7 @@ data:
   RABBITMQ_USERNAME: guest
   FANOUT_EXCHANGE_NAME: banking.transaction-events
   NOTIFICATION_QUEUE_NAME: notification.transaction-events
+  LARGE_AMOUNT_THRESHOLD: "1000000"
+  VELOCITY_WINDOW_SECONDS: "60"
+  VELOCITY_MAX_COUNT: "5"
+  FRAUD_QUEUE_NAME: fraud.transaction-events

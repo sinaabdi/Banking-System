@@ -30,11 +30,12 @@ public class TransactionEventPublisher {
     // a fanout exchange ignores it entirely; every bound queue gets a copy regardless.
     @TransactionalEventListener(phase = TransactionPhase.AFTER_COMMIT)
     public void onTransactionPosted(TransactionPostedEvent event) {
-        NotificationRequest payload = new NotificationRequest(event.transactionId(), event.type(), event.status());
+        TransactionEventPayload payload = new TransactionEventPayload(event.transactionId(), event.type(), event.status(), event.amount(), event.currency(), event.accountId(), event.userId(), event.counterpartyAccountId(), event.counterpartyUserId());
         String exchangeName = fanoutExchange.getName();
 
-        log.debug("Publishing transaction-posted event: transactionId={} type={} status={}",
-                event.transactionId(), event.type(), event.status());
+        log.debug("Publishing transaction-posted event: transactionId={} type={} status={} amount={} currency={} accountId={} userId={} counterpartyAccountId={} counterpartyUserId={}",
+                event.transactionId(), event.type(), event.status(), event.amount(), event.currency(),
+                event.accountId(), event.userId(), event.counterpartyAccountId(), event.counterpartyUserId());
 
         // Broker unreachable must never fail the banking operation that already committed - this is
         // fire-and-forget by design, same guarantee the old direct HTTP call to notification-service
