@@ -179,10 +179,10 @@ A single `GlobalExceptionHandler` maps exceptions to HTTP responses: `NoSuchElem
 ## Containerization
 
 Each service has its own `Dockerfile`, colocated in its own directory (`banking/Dockerfile`,
-`notification-service/Dockerfile`) with its own `.dockerignore`, not one shared root-level Dockerfile
-per service distinguished by suffix. This scales better as more services get added, and it means each
-service's `docker-compose.yml` `build.context` points at that service's own directory, so its
-Dockerfile's `COPY` paths are relative to itself rather than the repo root.
+`notification-service/Dockerfile`, `fraud-service/Dockerfile`) with its own `.dockerignore`, not one
+shared root-level Dockerfile per service distinguished by suffix. This scales better as more services
+get added, and it means each service's `docker-compose.yml` `build.context` points at that service's
+own directory, so its Dockerfile's `COPY` paths are relative to itself rather than the repo root.
 
 `banking/Dockerfile` is a two-stage build:
 1. **`builder`** (`eclipse-temurin:25-jdk-*`) - copies the Gradle wrapper and `build.gradle` first and
@@ -192,13 +192,17 @@ Dockerfile's `COPY` paths are relative to itself rather than the repo root.
    `COPY --from=builder`. No JDK, no Gradle, no source ever reaches this image - just a JRE and one
    jar.
 
-`notification-service/Dockerfile` follows the same shape with Go's toolchain instead: a
-`golang:*-alpine` builder stage runs `go build`, and a bare `alpine` runtime stage copies out just the
-compiled binary - no Go toolchain or source in the final image either.
+`notification-service/Dockerfile` and `fraud-service/Dockerfile` both follow the same shape with Go's
+toolchain instead: a `golang:*-alpine` builder stage runs `go build`, and a bare `alpine` runtime stage
+copies out just the compiled binary - no Go toolchain or source in the final image either.
 
-`docker-compose.yml` runs `core`, `notification`, `postgres`, and `rabbitmq` together, all on a
+`docker-compose.yml` runs `core`, `notification`, `fraud`, `postgres`, and `rabbitmq` together, all on a
 `backend` bridge network so Compose's internal DNS resolves each by service name - unlike the host
 workflow, `localhost` inside any one container means that container itself, not any of the others.
+`core`, `notification`, and `fraud` only `depends_on` the services they actually need to be up first -
+`notification` and `fraud` each just need RabbitMQ, not each other and not `core` - since a fanout
+consumer's only real startup dependency is the broker itself; chaining them onto `core` would
+reintroduce the exact coupling this design exists to remove.
 
 This is why `application.properties`'s datasource/RabbitMQ settings are `${DB_URL:localhost}`-style
 placeholders (and, on the Go side, `os.Getenv` with a hardcoded fallback, since Go has no built-in
@@ -250,6 +254,15 @@ retries a failed initial connection.
 - **`notification`** - 2 replicas, `env` sourced the same way as `core`'s RabbitMQ settings, plus
   `NOTIFICATION_QUEUE_NAME`. No `PersistentVolumeClaim` - it's stateless (an in-memory store), same as
   `core`.
+- **`fraud`** - **`replicas: 1`, deliberately, for a different reason than `rabbitmq`'s.** It isn't a
+  broker-clustering problem here - it's that `fraud`'s velocity tracker and flag store are both plain
+  in-process memory with no shared backing store. If it ran with 2 replicas, both would bind the exact
+  same queue name (`fraud.transaction-events`), making them competing consumers of one queue - RabbitMQ
+  would split messages between the two pods rather than give each a full copy, so a single user's rapid
+  transactions could land on two different pods, each holding an incomplete view of that user's recent
+  activity, silently breaking the velocity rule. `env` sourced the same way as `notification`'s, plus
+  the three scoring thresholds (`LARGE_AMOUNT_THRESHOLD`/`VELOCITY_WINDOW_SECONDS`/
+  `VELOCITY_MAX_COUNT`).
 
 **Health probes**: added `spring-boot-starter-actuator` with
 `management.endpoint.health.probes.enabled=true`, which exposes two Kubernetes-specific endpoints -
@@ -272,20 +285,30 @@ can silently fail to refresh an already-loaded tag while a pod is still running 
 sequence is scale the deployment to 0 first (so nothing holds the old image), remove it on each node
 (`minikube ssh -n <node> -- docker rmi <image>:local`), reload, then scale back up.
 
-**A brand-new RabbitMQ can drop its very first message** - encountered directly while first deploying
-this: the exchange is only created lazily on `core`'s first publish, and `notification`'s queue is only
-bound to it during `notification`'s own startup. On a truly fresh PVC, if the first publish happens
-before the first successful bind, the message has nowhere to go - a fanout exchange doesn't buffer for
-queues that don't exist yet at publish time. This can't recur once both exist (they're durable), so
-it's a one-time concern specific to a brand-new environment, not an ongoing reliability gap.
+**A `ConfigMap` edit only takes effect once re-applied** - encountered directly while wiring up `fraud`:
+adding new keys to `k8s/config.yaml` and saving the file changes nothing in the cluster on its own.
+A pod referencing a key that isn't in the *live* `ConfigMap` yet fails immediately with
+`CreateContainerConfigError` (`kubectl describe pod` names the missing key directly), even though the
+key is sitting right there in the file. `kubectl apply -f k8s/config.yaml` is what actually updates
+what the cluster sees; the deployment then needs a pod-template change (or a manual
+`kubectl rollout restart`) to pick up the new values, since editing a `ConfigMap` alone doesn't restart
+the pods that reference it.
+
+**A brand-new RabbitMQ used to be able to drop its very first message** - encountered directly while
+first deploying this, and since fixed at the source rather than left as a standing caveat: the exchange
+used to only be created lazily, on `core`'s first publish, so on a truly fresh broker a consumer's
+queue bind could race it. See [Notification Service](#notification-service) below for how `core` now
+declares the exchange eagerly at startup instead, closing this permanently rather than just documenting
+it as a one-time risk.
 
 ## Notification Service
 
 The first genuinely polyglot piece: [notification-service/](notification-service/) is a standalone Go
 service that reacts to every posted transaction, over **RabbitMQ**. This started as a direct
 synchronous HTTP call and was deliberately migrated to a message broker specifically to support more
-than one independent consumer of the same event (a planned fraud/risk-scoring service is next) without
-`core` ever needing to know how many consumers exist.
+than one independent consumer of the same event without `core` ever needing to know how many consumers
+exist - see [Fraud-Scoring Service](#fraud-scoring-service) below for the second one, added with zero
+changes to this service or to `core`'s publish path.
 
 **Event flow (Java side)**: `TransactionService`'s `deposit`/`withdraw`/`transfer`/`reverse` each
 publish a `TransactionPostedEvent` (via `ApplicationEventPublisher`) immediately after
@@ -304,10 +327,24 @@ and became "publish a domain event for whoever's listening") consumes it via
   `banking.transaction-events`. A fanout exchange forwards every published message to *every* queue
   bound to it, ignoring routing keys entirely - exactly the shape needed for "N independent consumers,
   each wants their own full copy of every event," as opposed to routing different message *categories*
-  to different places (what direct/topic exchanges are for). If `notification` and a future
-  fraud-scoring service both consumed from the *same* queue instead, RabbitMQ would split messages
-  between them (competing consumers - each message goes to exactly one consumer, right for scaling one
-  service horizontally, wrong for two different services that each need every message).
+  to different places (what direct/topic exchanges are for). If `notification` and `fraud` both
+  consumed from the *same* queue instead, RabbitMQ would split messages between them (competing
+  consumers - each message goes to exactly one consumer, right for scaling one service horizontally,
+  wrong for two different services that each need every message).
+- **Eager exchange declaration, not lazy**: Spring AMQP's `RabbitAdmin` auto-declares every registered
+  `Exchange`/`Queue`/`Binding` bean, but only once something opens a real connection to the broker -
+  by default that's lazy, triggered by the first actual `RabbitTemplate.convertAndSend(...)` call, not
+  at startup. On a completely fresh broker, that used to leave a real window where a consumer's queue
+  bind could race `core`'s first-ever publish and lose. Closed by declaring `RabbitAdmin` explicitly
+  (this Spring Boot version doesn't auto-configure one) and adding an `ApplicationRunner` bean that
+  calls `rabbitAdmin.initialize()` - an `ApplicationRunner` only runs once every singleton bean in the
+  context (including `fanoutExchange()`) already exists, and always before the app finishes starting,
+  so the exchange is guaranteed to exist before any transaction can possibly be posted, on every
+  startup, not just after the first real publish on a given broker. (An earlier attempt called
+  `rabbitAdmin.initialize()` directly from `RabbitMQConfig`'s constructor instead - that doesn't work,
+  because `fanoutExchange()` itself isn't registered in the context yet at that point: a
+  `@Configuration` class's own instance has to be fully constructed before Spring can call its `@Bean`
+  factory methods to produce their beans.)
 - **Why the publish is still fire-and-forget**: an event is a side effect, not part of the banking
   domain's correctness - `RabbitTemplate.convertAndSend(...)` is wrapped in try/catch that logs and
   swallows any failure rather than rethrowing, same guarantee the old direct HTTP call had, just
@@ -321,9 +358,27 @@ and became "publish a domain event for whoever's listening") consumes it via
   bean; Spring Boot auto-wires it into the `RabbitTemplate` it builds once exactly one
   `MessageConverter` bean exists.
 - **Field-name bridging**: the outgoing payload is a separate `TransactionEventPayload` record, not the
-  event itself reused - Go's struct expects `snake_case` keys (`transaction_id`), so the mismatched
-  field is annotated `@JsonProperty("transaction_id")` on that DTO rather than on the event (the enum
-  fields `type`/`status` need no annotation - Jackson serializes an enum as its `name()` by default).
+  event itself reused - Go's struct expects `snake_case` keys (`transaction_id`, `account_id`, etc.),
+  so every mismatched field gets `@JsonProperty` on that DTO rather than on the event (the enum fields
+  `type`/`status` need no annotation - Jackson serializes an enum as its `name()` by default).
+- **What the event actually carries**: beyond `transactionId`/`type`/`status`, `TransactionPostedEvent`
+  (and the wire payload built from it) carries `amount`, `currency`, `accountId`, `userId`, and nullable
+  `counterpartyAccountId`/`counterpartyUserId` - added specifically so a fanout consumer can do
+  anything beyond "log that something happened" without needing its own database. Since it's a fanout
+  exchange, one published body already reaches every consumer, so enriching the one shared event was
+  the right move rather than standing up a second, consumer-specific message.
+  **Resolution rule**: every transaction has exactly two `LedgerEntry` rows (one `DEBIT`, one `CREDIT`).
+  Whichever of those two *aren't* a `SYSTEM`-type account are the real parties. If only one side is
+  non-system (deposits, withdrawals, and their reversals), that account is `accountId` and there's no
+  counterparty. If both sides are non-system (transfers and transfer reversals), the `DEBIT` side is
+  `accountId` - "whose funds decreased in *this* transaction" - and the `CREDIT` side is
+  `counterpartyAccountId`. One private helper in `TransactionService`, fed a transaction and its ledger
+  entries, implements this once and covers all four transaction types plus reversals of each, rather
+  than branching on `TransactionType` at every one of the four publish call sites. Filtering on
+  `AccountType.SYSTEM` specifically (rather than, say, direction alone) matters more than it looks: the
+  seeded system account belongs to a real user (`system`, seeded as `ADMIN`), so a rule that didn't
+  filter it out could leak that user's id into `userId` and quietly merge every deposit/withdrawal in
+  the whole bank into one velocity bucket.
 
 **The Go service itself**: its first real third-party dependency (`github.com/rabbitmq/amqp091-go`),
 replacing the stdlib-only approach used until this stage. On startup it connects, declares its own
@@ -354,3 +409,48 @@ push.
 placeholder syntax) plus `FANOUT_EXCHANGE_NAME`/`NOTIFICATION_QUEUE_NAME`, all defaulting to
 `localhost`/dev credentials for the host workflow and overridden via `.env`/Kubernetes
 `ConfigMap`/`Secret` elsewhere - both `docker-compose.yml` and `k8s/` now fully cover this service.
+
+## Fraud-Scoring Service
+
+[fraud-service/](fraud-service/) is the second consumer bound to the shared `banking.transaction-events`
+exchange - its own durable queue (`fraud.transaction-events`), completely independent of
+`notification-service`'s. It's purely event-driven, with no database of its own: everything it needs to
+score a transaction is already denormalized onto the shared event (see
+[Notification Service](#notification-service) above for exactly what that event carries and why), which
+is the whole payoff of enriching one shared message instead of giving each consumer a bespoke one.
+
+**Two scoring rules, both real logic rather than placeholders:**
+- **Large-amount threshold**: `amount >= LARGE_AMOUNT_THRESHOLD` (env-configured, minor units) flags
+  `"large_amount"`. Deliberately currency-naive for now - a $10,000 threshold and a €10,000 one are
+  currently the same raw number, since this project has no FX conversion yet (the still-pending third
+  Go service). Fine for a first pass; worth revisiting once that exists.
+- **Velocity, keyed by `userID` rather than `accountID`**: a `VelocityTracker` type holds
+  `map[int][]time.Time` behind its own `sync.Mutex`. On every event, for that user's slot: prune
+  timestamps older than `VELOCITY_WINDOW_SECONDS`, append "now", and if what's left exceeds
+  `VELOCITY_MAX_COUNT`, flag `"high_velocity"`. Keying by user rather than account is deliberate - it's
+  what catches someone spreading rapid activity across *several* accounts they own, the actual reason
+  `userId`/`counterpartyUserId` were worth adding to the shared event at all, not just the account ids.
+  A transaction can trigger both rules at once; a flag records every reason that fired, not just the
+  first.
+
+**A real correctness bug, encountered and fixed while building this**: the fraud-side `Transaction`
+struct's `ID` field is an internal, per-process sequence number (`t.ID = len(transactionQueue) + 1` -
+"the Nth event this process has ever received"), separate from `TransactionID`, the real id decoded off
+the wire message. An early version of the scoring code built each `RiskFlag` with `TransactionID: t.ID`
+instead of `t.TransactionID` - it looked correct in testing because the very first event a fresh process
+receives happens to get internal id 1, coincidentally matching a low real transaction id, and only
+diverged visibly once the process had handled more than one event. Caught by deliberately sending a
+second transaction and checking the flag's `transaction_id` against the real one from `core`'s own
+response, not by code review alone - exactly the kind of bug that "looks right" until you check it
+against a second data point.
+
+`RiskFlag` (`ID`, `TransactionID`, `AccountID`, `UserID`, `Reasons []string`, `FlaggedAt`) is stored the
+same way `notification-service` stores its notifications - a package-level slice guarded by a
+`sync.Mutex` - and `GET /flags` (`:9091`) lists everything flagged so far.
+
+**Config**: the same RabbitMQ connection vars as `notification-service`, plus its own
+`FRAUD_QUEUE_NAME`, and the three scoring thresholds
+(`LARGE_AMOUNT_THRESHOLD`/`VELOCITY_WINDOW_SECONDS`/`VELOCITY_MAX_COUNT`) - same `os.Getenv`-with-
+fallback pattern throughout, and both `docker-compose.yml` and `k8s/` fully cover this service. See
+[Kubernetes Deployment](#kubernetes-deployment) above for why this service specifically needs
+`replicas: 1` - a different reason than `rabbitmq`'s, but just as real a constraint.

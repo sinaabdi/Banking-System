@@ -4,8 +4,9 @@ A double-entry bookkeeping banking API, built with Spring Boot as a learning pro
 longer-term plan toward a polyglot microservices system (Go/Rust/Python, Redis, MQ, Kubernetes,
 GitOps CI/CD). Phase 1 covers a single monolithic service: users, accounts, deposits/withdrawals/
 transfers/reversals, JWT authentication, and role/ownership-based authorization. Phase 2 is underway -
-Docker/Kubernetes deployment, and a first companion microservice in Go (see
-[Notification service](#notification-service) below) that the main app talks to over HTTP.
+Docker/Kubernetes deployment, RabbitMQ, and two companion Go microservices that both react to every
+posted transaction independently: [notification service](#notification-service) and
+[fraud-scoring service](#fraud-scoring-service).
 
 For the design decisions behind how this is built - the ledger model, concurrency strategy, and
 authentication/authorization - see [architucture.md](architucture.md).
@@ -20,8 +21,9 @@ authentication/authorization - see [architucture.md](architucture.md).
 - JUnit 5 + Mockito for unit tests, a `@SpringBootTest` integration test against a real Postgres
   instance for the concurrency guarantees Mockito alone can't prove
 - Docker (multi-stage build, one per service) + Kubernetes manifests for deployment
-- Go 1.25 - a companion notification service
-- RabbitMQ - async transaction-posted events (`spring-boot-starter-amqp` / `amqp091-go`)
+- Go 1.25 - two companion services, notification and fraud-scoring
+- RabbitMQ - async transaction-posted events, fanned out to both Go services independently
+  (`spring-boot-starter-amqp` / `amqp091-go`)
 
 ## Running it locally
 
@@ -46,17 +48,19 @@ Postgres needs to be running for this too - one test (`TransactionServiceConcurr
 
 ## Running it with Docker Compose
 
-Alternatively, run the whole stack - app, notification service, Postgres, and RabbitMQ - in
-containers, no local JDK/Gradle/Go needed:
+Alternatively, run the whole stack - app, notification service, fraud-scoring service, Postgres, and
+RabbitMQ - in containers, no local JDK/Gradle/Go needed:
 ```bash
 docker compose up --build
 ```
-Each service builds from its own `Dockerfile` (`banking/Dockerfile`, `notification-service/Dockerfile`
-- a multi-stage build per service: compile with the full JDK/Go toolchain, run with just a JRE/a bare
-Alpine image). Compose starts Postgres and RabbitMQ first, waits for both to actually be ready to
-accept connections (not just for their containers to start), then starts `core` and `notification`.
-The API is up at `http://localhost:8080`, same as the local workflow; RabbitMQ's management UI is at
-`http://localhost:15672` (`guest`/`guest`).
+Each service builds from its own `Dockerfile` (`banking/Dockerfile`, `notification-service/Dockerfile`,
+`fraud-service/Dockerfile` - a multi-stage build per service: compile with the full JDK/Go toolchain,
+run with just a JRE/a bare Alpine image). Compose starts Postgres and RabbitMQ first, waits for both to
+actually be ready to accept connections (not just for their containers to start), then starts `core`,
+`notification`, and `fraud` - the two Go services start independently of each other and of `core`, each
+only waiting on RabbitMQ itself (see [architucture.md](architucture.md#containerization) for why
+that's the only real startup dependency here). The API is up at `http://localhost:8080`, same as the
+local workflow; RabbitMQ's management UI is at `http://localhost:15672` (`guest`/`guest`).
 
 The containerized services get their settings from the `.env` file at the repo root
 (`DB_URL=postgres`, `RABBITMQ_HOST=rabbitmq`, etc. - Compose's internal DNS resolves these to the
@@ -68,13 +72,15 @@ right containers) instead of each service's own `localhost` defaults, which stay
 The manifests in [k8s/](k8s/) deploy the same app + Postgres onto any cluster - developed and tested
 against a local [minikube](https://minikube.sigs.k8s.io/) cluster (`docker` driver).
 
-**1. Build both app images and load them into the cluster** (minikube doesn't see your local Docker
-images by default - `minikube image load` copies them in):
+**1. Build all three app images and load them into the cluster** (minikube doesn't see your local
+Docker images by default - `minikube image load` copies them in):
 ```bash
 docker build -t banking-core:local ./banking
 docker build -t banking-notification:local ./notification-service
+docker build -t banking-fraud:local ./fraud-service
 minikube image load banking-core:local
 minikube image load banking-notification:local
+minikube image load banking-fraud:local
 ```
 Rebuilding after a code change isn't enough on its own - see the note on `imagePullPolicy: Never`
 below the verification steps.
@@ -101,18 +107,21 @@ minikube service core -n banking --url
 Leave that running, and use the URL it prints from a **second terminal of the same kind** (both
 native Windows, or both WSL - mixing the two can silently fail to connect).
 
-**Two gotchas worth knowing about, both encountered and fixed for real while building this:**
+**Gotchas worth knowing about, encountered and fixed for real while building this:**
 - `imagePullPolicy: Never` means a stale image is never automatically replaced. Rebuilding
   `banking-core:local` and re-running `minikube image load` isn't always enough by itself - if pods
   are still running on the old image, the node may not actually swap it in. Safe sequence:
   `kubectl scale deployment/<name> -n banking --replicas=0`, remove the old image on each node
   (`minikube ssh -n <node> -- docker rmi <image>:local`), reload, then scale back up.
-- On a **completely fresh** RabbitMQ (a brand-new PVC, nothing ever declared), the very first event
-  can be silently dropped: the exchange is only created lazily on `core`'s first publish, and
-  `notification`'s queue only gets bound to it during its own startup - if that first publish happens
-  before the binding has succeeded, the message has nowhere to go and a fanout exchange doesn't buffer
-  for queues that don't exist yet. This can't recur once both exist (they're durable), so it's only
-  ever a one-time concern on a truly fresh environment.
+- After editing `k8s/config.yaml`, `kubectl apply -f k8s/config.yaml` has to actually be re-run - a
+  pod referencing a `ConfigMap` key that doesn't exist yet in the cluster fails with
+  `CreateContainerConfigError`, even though the key is right there in the file on disk. Editing the
+  manifest and applying it are two separate steps; only the second one changes what the cluster sees.
+- `core` used to be able to drop the very first event ever published on a completely fresh RabbitMQ
+  (the exchange was only ever declared lazily, on `core`'s first publish) - this is fixed now, not
+  just documented as a one-time risk: `RabbitMQConfig` declares the exchange eagerly at startup, before
+  the app can accept any request at all. See
+  [architucture.md](architucture.md#notification-service) for how.
 
 ## Notification service
 
@@ -136,8 +145,31 @@ merits. Unlike the direct-HTTP-call design this replaced, a message published wh
 service happens to be *down* now waits safely in the queue instead of being lost - proven directly by
 stopping the service, depositing, and watching it get picked up once the service comes back. See
 [architucture.md](architucture.md#notification-service) for the full design reasoning, including why
-it's a fanout exchange specifically (built to support more than one independent consumer later - a
-planned fraud/risk-scoring service, for instance).
+it's a fanout exchange specifically (built to support more than one independent consumer with zero
+changes to `core` - see the [fraud-scoring service](#fraud-scoring-service) below, which is exactly
+that second consumer).
+
+## Fraud-scoring service
+
+[fraud-service/](fraud-service/) is the second independent consumer bound to the same
+`banking.transaction-events` fanout exchange - its own durable queue (`fraud.transaction-events`), so
+it gets a full copy of every event regardless of whether `notification-service` is even running. Run
+it on its own (RabbitMQ must already be up - `docker compose up -d rabbitmq`):
+```bash
+cd fraud-service
+go run main.go
+```
+It applies two scoring rules to every event it receives:
+- **Large-amount threshold** (`LARGE_AMOUNT_THRESHOLD`, minor units) - flags a single transaction
+  outright if its amount meets or exceeds the threshold.
+- **Velocity** (`VELOCITY_WINDOW_SECONDS`/`VELOCITY_MAX_COUNT`) - a sliding time window, keyed by
+  `user_id` rather than account, so it catches a user spreading rapid activity across *several*
+  accounts they own, not just one. Both amount and velocity can flag the same transaction at once.
+
+`GET /flags` (`:9091`) lists every flagged transaction with its reason(s) - the easiest way to verify
+the scoring end to end. See [architucture.md](architucture.md#fraud-scoring-service) for the full
+design, including how `accountId`/`userId`/`counterpartyAccountId`/`counterpartyUserId` get resolved
+onto the shared event from the double-entry ledger.
 
 ## Configuration
 
@@ -197,5 +229,10 @@ notification-service/
   go.mod/go.sum  first real third-party Go dependency (github.com/rabbitmq/amqp091-go)
   Dockerfile     multi-stage build for this service
 
-k8s/   Kubernetes manifests for every service above, including rabbitmq-*.yaml
+fraud-service/
+  main.go     Go fraud-scoring service - RabbitMQ consumer, velocity tracker, GET /flags
+  go.mod/go.sum
+  Dockerfile     multi-stage build for this service
+
+k8s/   Kubernetes manifests for every service above, including rabbitmq-*.yaml and fraud-*.yaml
 ```
