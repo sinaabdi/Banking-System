@@ -4,6 +4,7 @@ import com.sina.banking.models.Transaction;
 import com.sina.banking.models.TransactionStatus;
 import com.sina.banking.models.TransactionType;
 import io.swagger.v3.oas.annotations.media.Schema;
+import jakarta.annotation.Nullable;
 
 import java.time.LocalDateTime;
 
@@ -38,7 +39,15 @@ public class TransactionDTOs {
             TransactionStatus transactionStatus,
             String idempotencyKey,
             LocalDateTime createdAt,
-            LocalDateTime updateAt
+            LocalDateTime updateAt,
+            @Nullable
+            Long sourceAmount,
+            @Nullable
+            String sourceCurrency,
+            @Nullable
+            Long destinationAmount,
+            @Nullable
+            String destinationCurrency
     ) {
         public static TransactionResponse from(Transaction transaction) {
             return new TransactionResponse(
@@ -47,7 +56,23 @@ public class TransactionDTOs {
                     transaction.getStatus(),
                     transaction.getIdempotencyKey(),
                     transaction.getCreatedAt(),
-                    transaction.getUpdatedAt()
+                    transaction.getUpdatedAt(),
+                    null, null, null, null
+            );
+        }
+
+        public static TransactionResponse fromTransfer(Transaction transaction, Long sourceAmount, String sourceCurrency, Long destinationAmount, String destinationCurrency) {
+            return new TransactionResponse(
+                    transaction.getId(),
+                    transaction.getType(),
+                    transaction.getStatus(),
+                    transaction.getIdempotencyKey(),
+                    transaction.getCreatedAt(),
+                    transaction.getUpdatedAt(),
+                    sourceAmount,
+                    sourceCurrency,
+                    destinationAmount,
+                    destinationCurrency
             );
         }
     }

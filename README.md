@@ -4,9 +4,10 @@ A double-entry bookkeeping banking API, built with Spring Boot as a learning pro
 longer-term plan toward a polyglot microservices system (Go/Rust/Python, Redis, MQ, Kubernetes,
 GitOps CI/CD). Phase 1 covers a single monolithic service: users, accounts, deposits/withdrawals/
 transfers/reversals, JWT authentication, and role/ownership-based authorization. Phase 2 is underway -
-Docker/Kubernetes deployment, RabbitMQ, and two companion Go microservices that both react to every
-posted transaction independently: [notification service](#notification-service) and
-[fraud-scoring service](#fraud-scoring-service).
+Docker/Kubernetes deployment, RabbitMQ, and three companion Go microservices: two that react to every
+posted transaction independently, [notification service](#notification-service) and
+[fraud-scoring service](#fraud-scoring-service), and one `core` calls synchronously for cross-currency
+transfers, the [FX-rate service](#fx-rate-service).
 
 For the design decisions behind how this is built - the ledger model, concurrency strategy, and
 authentication/authorization - see [architucture.md](architucture.md).
@@ -21,9 +22,12 @@ authentication/authorization - see [architucture.md](architucture.md).
 - JUnit 5 + Mockito for unit tests, a `@SpringBootTest` integration test against a real Postgres
   instance for the concurrency guarantees Mockito alone can't prove
 - Docker (multi-stage build, one per service) + Kubernetes manifests for deployment
-- Go 1.25 - two companion services, notification and fraud-scoring
-- RabbitMQ - async transaction-posted events, fanned out to both Go services independently
-  (`spring-boot-starter-amqp` / `amqp091-go`)
+- Go 1.25 - three companion services: notification, fraud-scoring, and FX-rate
+- RabbitMQ - async transaction-posted events, fanned out to the notification and fraud-scoring
+  services independently (`spring-boot-starter-amqp` / `amqp091-go`)
+- Synchronous HTTP (`RestClient`) from `core` to the FX-rate service, for cross-currency transfers -
+  the one place a Go service isn't a RabbitMQ consumer, since a rate lookup is a data dependency
+  `core` needs an answer to before it can proceed, not a side-effect notification
 
 ## Running it locally
 
@@ -44,12 +48,21 @@ The API is now up at `http://localhost:8080`.
 ```bash
 ./gradlew test
 ```
-Postgres needs to be running for this too - one test (`TransactionServiceConcurrencyTest`) fires real concurrent requests against a real database to prove the pessimistic-locking strategy actually prevents an account from being overdrawn; that's not something a mocked repository can verify.
+Postgres needs to be running for this too - one test (`TransactionServiceConcurrencyTest`) fires real concurrent requests against a real database to prove the pessimistic-locking strategy actually prevents an account from being overdrawn; that's not something a mocked repository can verify. RabbitMQ needs to be running as well, for the tests that load the full Spring context.
+
+**4. Run fx-service** (only needed for cross-currency transfers - same-currency transfers work without it):
+```bash
+cd fx-service
+go run main.go
+```
+Listens on `:9092`. See [FX-Rate Service](#fx-rate-service) below.
 
 ## Running it with Docker Compose
 
 Alternatively, run the whole stack - app, notification service, fraud-scoring service, Postgres, and
-RabbitMQ - in containers, no local JDK/Gradle/Go needed:
+RabbitMQ - in containers, no local JDK/Gradle/Go needed. **fx-service isn't part of this yet** - it has
+no `Dockerfile` or Compose entry, so cross-currency transfers won't work against this stack until it's
+run separately on the host (`cd fx-service && go run main.go`); same-currency transfers are unaffected:
 ```bash
 docker compose up --build
 ```
@@ -70,7 +83,9 @@ right containers) instead of each service's own `localhost` defaults, which stay
 ## Running it on Kubernetes
 
 The manifests in [k8s/](k8s/) deploy the same app + Postgres onto any cluster - developed and tested
-against a local [minikube](https://minikube.sigs.k8s.io/) cluster (`docker` driver).
+against a local [minikube](https://minikube.sigs.k8s.io/) cluster (`docker` driver). fx-service has no
+manifests yet, same gap as Docker Compose above - cross-currency transfers won't work in-cluster until
+that's added.
 
 **1. Build all three app images and load them into the cluster** (minikube doesn't see your local
 Docker images by default - `minikube image load` copies them in):
@@ -171,6 +186,34 @@ the scoring end to end. See [architucture.md](architucture.md#fraud-scoring-serv
 design, including how `accountId`/`userId`/`counterpartyAccountId`/`counterpartyUserId` get resolved
 onto the shared event from the double-entry ledger.
 
+## FX-rate service
+
+[fx-service/](fx-service/) is the third Go service, and the only one `core` talks to directly over
+HTTP rather than through RabbitMQ - it answers a rate lookup `core` needs an actual answer to before it
+can post a cross-currency transfer, not a side-effect notification the rest can fire-and-forget. Run
+it on its own (no RabbitMQ, no Postgres, no other service needed at all):
+```bash
+cd fx-service
+go run main.go
+```
+It seeds a small base table of simulated USD-per-unit rates (EUR/GBP/JPY/CAD/AUD/CHF) and nudges each
+one with a small bounded random drift every few seconds - simulated rather than pulled from a real
+external FX API, so the whole system stays self-contained and works fully offline, the same choice
+already made for `notification-service`/`fraud-service`.
+
+- `GET /rate?from=X&to=Y` (`:9092`) - the rate `core` actually calls, triangulated through USD
+  (`rate(A->B) = rate(B)/rate(A)`) rather than a maintained N² pairwise table.
+- `GET /rates` - the full live table, the easiest way to watch the drift happen across repeated calls.
+
+With `fx-service` up, `POST /api/transactions/transfer` now accepts a destination account in a
+*different* currency from the source - the request shape is unchanged (`amount`/`currency` are the
+source side, exactly what leaves the source account), and the response's new `sourceAmount`/
+`sourceCurrency`/`destinationAmount`/`destinationCurrency` fields show exactly what was sent and what
+the destination account actually received. A same-currency transfer works exactly as before, with
+`fx-service` never even contacted. See [architucture.md](architucture.md#fx-rate-service) for the full
+design, including why the rate is fetched before the pessimistic account locks rather than after, and
+two real bugs caught and fixed while building it.
+
 ## Configuration
 
 `application.properties` ships with a working local JWT secret (`jwt.secret`) and a 1-hour expiry (`jwt.expiration-ms`) so the app runs out of the box. **The committed secret is for local development only** - in any shared or deployed environment, this should come from an environment variable or a secrets manager instead, never from a file checked into version control. (This is exactly what the Kubernetes deployment above does - `JWT_SECRET` comes from `k8s/secret.yaml`, overriding the committed default.)
@@ -234,5 +277,12 @@ fraud-service/
   go.mod/go.sum
   Dockerfile     multi-stage build for this service
 
-k8s/   Kubernetes manifests for every service above, including rabbitmq-*.yaml and fraud-*.yaml
+fx-service/
+  main.go        Go FX-rate service - simulated rate table + drift, GET /rate, GET /rates
+  main_test.go   first Go tests in this project (triangulation math, drift bounds)
+  go.mod/go.sum
+  (no Dockerfile yet - not containerized/deployed to k8s in this stage)
+
+k8s/   Kubernetes manifests for every service above except fx-service, including rabbitmq-*.yaml and
+       fraud-*.yaml
 ```

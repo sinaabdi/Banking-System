@@ -52,6 +52,11 @@ created_at         -- no updated_at, no setters: append-only. A mistake is corre
                    -- new reversal, never by editing an existing entry.
 ```
 
+Nothing in the schema ties the two `LEDGER_ENTRY` rows of one `TRANSACTION` to the same `amount`/
+`currency` - every transaction type held them equal only by convention, until cross-currency
+`transfer` (see [FX-Rate Service](#fx-rate-service) below) became the first to legitimately post a
+debit and credit with different amounts *and* different currencies on the same transaction.
+
 Balance is never stored - it's always derived as `sum(CREDIT) - sum(DEBIT)` over an account's ledger entries, so it can never drift out of sync with the transaction history that produced it.
 
 ## Services
@@ -93,7 +98,9 @@ withdraw   -- debits the account, credits the SYSTEM account; rejects if the amo
            -- current balance; locks the account row for the duration (see Concurrency)
 transfer   -- debits the source, credits the destination, no SYSTEM account involved; both
            -- accounts are locked, always in a fixed order, to avoid deadlock; only the source's
-           -- balance can ever reject a transfer
+           -- balance can ever reject a transfer. If the two accounts' currencies differ, the
+           -- destination amount is converted via fx-service before locking - see
+           -- FX-Rate Service below
 reverse    -- posts a new REVERSAL transaction whose entries mirror the original's with direction
            -- flipped; only a POSTED, not-already-reversed, non-REVERSAL-type transaction is eligible
 getTransactionById
@@ -421,9 +428,11 @@ is the whole payoff of enriching one shared message instead of giving each consu
 
 **Two scoring rules, both real logic rather than placeholders:**
 - **Large-amount threshold**: `amount >= LARGE_AMOUNT_THRESHOLD` (env-configured, minor units) flags
-  `"large_amount"`. Deliberately currency-naive for now - a $10,000 threshold and a €10,000 one are
-  currently the same raw number, since this project has no FX conversion yet (the still-pending third
-  Go service). Fine for a first pass; worth revisiting once that exists.
+  `"large_amount"`. Still currency-naive - a $10,000 threshold and a €10,000 one are the same raw
+  number - even though [FX-Rate Service](#fx-rate-service) below now gives `core` a real conversion
+  rate to call on. `fraud-service` never sees it: the shared event still carries only the raw amount
+  and currency code, with no rate attached, so this remains a deliberate simplification to revisit,
+  not something FX-Rate Service happened to fix as a side effect.
 - **Velocity, keyed by `userID` rather than `accountID`**: a `VelocityTracker` type holds
   `map[int][]time.Time` behind its own `sync.Mutex`. On every event, for that user's slot: prune
   timestamps older than `VELOCITY_WINDOW_SECONDS`, append "now", and if what's left exceeds
@@ -454,3 +463,102 @@ same way `notification-service` stores its notifications - a package-level slice
 fallback pattern throughout, and both `docker-compose.yml` and `k8s/` fully cover this service. See
 [Kubernetes Deployment](#kubernetes-deployment) above for why this service specifically needs
 `replicas: 1` - a different reason than `rabbitmq`'s, but just as real a constraint.
+
+## FX-Rate Service
+
+[fx-service/](fx-service/) is the third and last of the originally-planned Go services, and the first
+one that isn't a RabbitMQ consumer at all - it has no queue, no exchange binding, and no dependency on
+the broker or on `core`'s startup. It exists to unblock a real feature: `transfer` used to hard-reject
+any currency mismatch between the two accounts outright, with no way to actually move money between,
+say, a USD account and a EUR account. This is what closes that gap.
+
+**Why synchronous HTTP, not RabbitMQ - a deliberate exception, not a regression.**
+`notification-service`/`fraud-service` are fire-and-forget because `core` doesn't need their answer to
+proceed - that's exactly why async fits. An FX rate is different in kind: `core` cannot correctly
+compute how much the destination account should receive without it, so this is a request/response data
+dependency, not a side-effect notification. `FxRateClient` (`services/`) wraps a single `RestClient`
+call to `fx-service`'s `GET /rate`; unlike the notification/fraud publish path, a failed call is *not*
+caught and swallowed - it propagates uncaught through `GlobalExceptionHandler`'s catch-all (500),
+because a transfer that silently skipped conversion would be a correctness bug, not a missed
+notification.
+
+**Simulated rates, not a real external FX API** - confirmed as the intended design, not a shortcut: one
+base table of "USD-per-unit" rates for the currencies already seeded in
+`V3__seed_system_account.sql` (EUR/GBP/JPY/CAD/AUD/CHF), with a background goroutine nudging each one
+by a small bounded random drift (±0.5%) every few seconds, guarded by a `sync.Mutex` - same "map +
+mutex" shape as `fraud-service`'s velocity tracker, just protecting a background-writer/HTTP-reader
+relationship instead of concurrent event writers. A rate between any two non-USD currencies is derived
+by triangulating through USD (`rate(A->B) = rate(B)/rate(A)`) rather than maintaining an N² pairwise
+table - USD itself is pinned and never drifts, since it's the fixed reference point everything else is
+quoted against. `GET /rate?from=X&to=Y` returns the derived rate; `GET /rates` lists the full live
+table, the easiest way to watch the drift happen over repeated calls.
+
+**A real concurrency bug, encountered and fixed while building this**: the drift goroutine's
+`time.Sleep` was originally placed *inside* the per-currency loop, with the mutex held for the entire
+outer loop around it - meaning the lock stayed held for the whole multi-second sleep, cycle after
+cycle, with almost no window for an HTTP handler to ever acquire it. Proven directly with a real
+`curl` request against the built binary: it hung for the full 20-second client timeout with no
+response. Fixed by moving `time.Sleep` before `mu.Lock()` and outside the inner loop, verified by the
+same request completing in single-digit milliseconds afterward. A related, smaller bug from the same
+stage: USD was drifting like every other currency at first (empirically caught by sampling `/rates`
+twice and watching USD's own value move), when it's supposed to be the fixed anchor - fixed with an
+explicit `continue` skipping USD inside the drift loop.
+
+**Go tests** (`main_test.go`, the first in this project) cover `triangulate` (pure division, tested via
+exact `assert.Equal` - safe here specifically because the test's expected value is computed with the
+identical floating-point expression the function itself uses, so it's bit-for-bit identical rather than
+just numerically close) and `applyDrift` (inherently random, so tested via a bounds check across
+thousands of calls on a fixed input instead of exact equality). The bounds test itself went through two
+real bugs before it caught anything: a `for rate := 0.01; rate < 1.0; rate++` loop where `rate++` on a
+`float64` adds `1.0`, not a small step - so the loop body ran exactly once instead of "many times"; and
+a boolean condition (`!(got <= upperBound) && !(got >= lowerBound)`) that used `&&` where it needed
+`||` - `got` can never be simultaneously above the upper bound *and* below the lower bound, so the
+assertion was unreachable and the test could not have failed no matter how broken `applyDrift` was.
+Proven by temporarily widening `applyDrift`'s bound to ±5% and confirming the test only started failing
+once both bugs were fixed.
+
+**Java side - lock-hold-time drives the ordering in `transfer`.** Fetching the rate happens *before*
+the pessimistic row locks are acquired, not after: `transfer` already holds both accounts' row locks
+for its full duration, and a network call to another service while holding them would extend that
+hold time unnecessarily - worse, a hung `fx-service` could tie up both accounts indefinitely. So
+`transfer` reads both accounts unlocked first (just to learn their currencies), decides via
+`resolveTransferAmounts` whether conversion is needed, and only *then* proceeds into the existing
+lock-acquire/ownership/balance-check flow - unchanged from before this stage, now with the destination
+amount already in hand. Same-currency transfers skip the `FxRateClient` call entirely, so the common
+path pays no added latency or dependency.
+
+`resolveTransferAmounts` (private helper + `FxDetails` record: `sourceAmount`/`sourceCurrency`/
+`destinationAmount`/`destinationCurrency`) does the actual conversion math in `BigDecimal`, not `double`
+- money multiplied by a rate has to round to an exact integer minor-unit amount, and floating point
+risks silent off-by-one-cent drift. Rounds half-up to the nearest minor unit via
+`setScale(0, RoundingMode.HALF_UP)`, then converts back to the `Long` `LedgerEntry` expects via
+`longValueExact()` specifically, not `longValue()` - proven directly with a synthetic large-amount
+repro (a plausible USD amount converted at a JPY-scale rate): `longValue()` silently truncated to a
+completely different, wrong `Long` with no error at all, while `longValueExact()` correctly threw
+`ArithmeticException`. For money, a loud failure on an amount too large to represent is far safer than
+a silent wraparound into a nonsense value.
+
+`checkCurrencyMatchForTransferOrElseThrow` relaxed from "both accounts must match the request currency"
+to "only the source account must" - `TransferRequest`'s existing `amount`/`currency` fields are
+reinterpreted as the *source* side (matching how a real transfer works: you specify what leaves your
+account), with the destination now allowed to differ. The credit `LedgerEntry` uses the resolved
+*destination* amount and currency, not the request's - a real bug caught partway through this stage,
+where the credit entry briefly paired the correctly-converted amount with the source's currency string
+still attached, which would have silently mislabeled the destination account's own ledger entries.
+
+**`TransactionResponse` gains four new nullable fields** - `sourceAmount`/`sourceCurrency`/
+`destinationAmount`/`destinationCurrency` - populated for transfers via a `fromTransfer` factory
+overload, `null` for every other transaction type via the original `from`. The idempotency-replay path
+inside `transfer` itself needed the same treatment: a retried request for an already-posted transfer
+now looks up that transaction's two `LedgerEntry` rows and rebuilds the response from the persisted
+`DEBIT`/`CREDIT` amounts and currencies, rather than falling back to the plain `from` (which would have
+silently dropped the conversion details on a retry, even though the original response had shown them).
+
+**Config**: `fx.service.url` (Java, `${FX_SERVICE_URL:http://localhost:9092}` - same single-full-URL
+pattern as `notification.service.url`, not a host+port split, since nothing here needs to compose a URL
+from separate parts). `fx-service` itself takes no configuration at all - no database, no RabbitMQ, no
+external dependency of any kind.
+
+**Not yet done, deliberately deferred**: `fx-service` has no `Dockerfile`, no `docker-compose.yml`
+entry, and no `k8s/` manifests yet - unlike `notification-service`/`fraud-service`, which are fully
+covered by both. This stage was scoped to the Java/Go application code and its tests only.
