@@ -17,3 +17,4 @@ data:
   VELOCITY_WINDOW_SECONDS: "60"
   VELOCITY_MAX_COUNT: "5"
   FRAUD_QUEUE_NAME: fraud.transaction-events
+  FX_SERVICE_URL: http://fx:9092

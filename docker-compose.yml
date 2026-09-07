@@ -77,6 +77,15 @@ services:
       retries: 3
     networks:
       - backend
+  
+  fx:
+    build:
+      context: ./fx-service
+      dockerfile: Dockerfile
+    ports:
+      - "9092:9092"
+    networks:
+      - backend
 
 volumes:
     postgres_data:

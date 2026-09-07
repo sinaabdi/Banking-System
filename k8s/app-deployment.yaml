@@ -92,3 +92,8 @@ spec:
                 configMapKeyRef:
                   key: FANOUT_EXCHANGE_NAME
                   name: banking-config
+            - name: FX_SERVICE_URL
+              valueFrom:
+                configMapKeyRef:
+                  key: FX_SERVICE_URL
+                  name: banking-config
