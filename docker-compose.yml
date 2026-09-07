@@ -1,11 +1,12 @@
-version: '3.8'
-
 services:
   core:
     depends_on:
       postgres:
         condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
     build:
+      context: ./banking
       dockerfile: Dockerfile
     env_file:
       - ".env"
@@ -34,8 +35,61 @@ services:
       timeout: 5s
       retries: 5
 
+  notification:
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    build:
+      context: ./notification-service
+      dockerfile: Dockerfile
+    ports:
+      - "9090:9090"
+    env_file:
+      - ".env"
+    networks:
+      - backend
+
+  fraud:
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    build:
+      context: ./fraud-service
+      dockerfile: Dockerfile
+    ports:
+      - "9091:9091"
+    env_file:
+      - ".env"
+    networks:
+      - backend
+
+  rabbitmq:
+    image: rabbitmq:4-management
+    ports:
+      - "15672:15672"
+      - "5672:5672"
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq/
+    healthcheck:
+      test: rabbitmq-diagnostics -q ping
+      interval: 5s
+      timeout: 5s
+      retries: 3
+    networks:
+      - backend
+  
+  fx:
+    build:
+      context: ./fx-service
+      dockerfile: Dockerfile
+    ports:
+      - "9092:9092"
+    networks:
+      - backend
+
 volumes:
     postgres_data:
+    rabbitmq_data:
 
 networks:
   backend:

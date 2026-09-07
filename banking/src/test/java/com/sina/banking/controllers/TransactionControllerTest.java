@@ -72,7 +72,7 @@ public class TransactionControllerTest {
     @Test
     void deposit_happyPath_return201() throws Exception {
         CreateTransactionRequest request = new CreateTransactionRequest("idem-key-123", 100L, "USD", 1);
-        TransactionResponse response = new TransactionResponse(1, TransactionType.DEPOSIT, TransactionStatus.POSTED, "idem-key-123", LocalDateTime.now(), LocalDateTime.now());
+        TransactionResponse response = new TransactionResponse(1, TransactionType.DEPOSIT, TransactionStatus.POSTED, "idem-key-123", LocalDateTime.now(), LocalDateTime.now(), null, null, null, null);
 
         when(transactionService.deposit(request, USER_ID, false)).thenReturn(response);
 
@@ -86,7 +86,7 @@ public class TransactionControllerTest {
     @Test
     void withdraw_happyPath_return201() throws Exception {
         CreateTransactionRequest request = new CreateTransactionRequest("idem-key-123", 100L, "USD", 1);
-        TransactionResponse response = new TransactionResponse(1, TransactionType.DEPOSIT, TransactionStatus.POSTED, "idem-key-123", LocalDateTime.now(), LocalDateTime.now());
+        TransactionResponse response = new TransactionResponse(1, TransactionType.DEPOSIT, TransactionStatus.POSTED, "idem-key-123", LocalDateTime.now(), LocalDateTime.now(), null, null, null, null);
 
         when(transactionService.withdraw(request, USER_ID, false)).thenReturn(response);
 
@@ -100,7 +100,7 @@ public class TransactionControllerTest {
     @Test
     void transfer_happyPath_return201() throws Exception {
         TransferRequest request = new TransferRequest("idem-key-123", 100L, "USD", USER_ID, 99);
-        TransactionResponse response = new TransactionResponse(1, TransactionType.TRANSFER, TransactionStatus.POSTED, "idem-key-123", LocalDateTime.now(), LocalDateTime.now());
+        TransactionResponse response = new TransactionResponse(1, TransactionType.TRANSFER, TransactionStatus.POSTED, "idem-key-123", LocalDateTime.now(), LocalDateTime.now(), null, null, null, null);
 
         when(transactionService.transfer(request, USER_ID, false)).thenReturn(response);
 
@@ -115,7 +115,7 @@ public class TransactionControllerTest {
     @Test
     void reverse_asNonAdmin_return403() throws Exception {
         ReverseTransactionRequest request = new ReverseTransactionRequest("idem-key-123", 1);
-        TransactionResponse response = new TransactionResponse(1, TransactionType.REVERSAL, TransactionStatus.POSTED, "idem-key-123", LocalDateTime.now(), LocalDateTime.now());
+        TransactionResponse response = new TransactionResponse(1, TransactionType.REVERSAL, TransactionStatus.POSTED, "idem-key-123", LocalDateTime.now(), LocalDateTime.now(), null, null, null, null);
 
         when(transactionService.reverse(request)).thenReturn(response);
 
@@ -129,7 +129,7 @@ public class TransactionControllerTest {
     @Test
     void reverse_asAdmin_return201() throws Exception {
         ReverseTransactionRequest request = new ReverseTransactionRequest("idem-key-123", 1);
-        TransactionResponse response = new TransactionResponse(1, TransactionType.REVERSAL, TransactionStatus.POSTED, "idem-key-123", LocalDateTime.now(), LocalDateTime.now());
+        TransactionResponse response = new TransactionResponse(1, TransactionType.REVERSAL, TransactionStatus.POSTED, "idem-key-123", LocalDateTime.now(), LocalDateTime.now(), null, null, null, null);
 
         when(transactionService.reverse(request)).thenReturn(response);
 

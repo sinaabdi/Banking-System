@@ -4,16 +4,21 @@ import com.sina.banking.DTOs.TransactionDTOs.ReverseTransactionRequest;
 import com.sina.banking.DTOs.TransactionDTOs.TransferRequest;
 import com.sina.banking.DTOs.TransactionDTOs.TransactionResponse;
 import com.sina.banking.DTOs.TransactionDTOs.CreateTransactionRequest;
+import com.sina.banking.events.TransactionPostedEvent;
 import com.sina.banking.models.*;
 import com.sina.banking.repositories.AccountRepository;
 import com.sina.banking.repositories.LedgerEntryRepository;
 import com.sina.banking.repositories.TransactionRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.security.access.AccessDeniedException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.math.BigDecimal;
+import java.math.RoundingMode;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.NoSuchElementException;
 import java.util.Optional;
@@ -21,18 +26,24 @@ import java.util.Optional;
 @Service
 public class TransactionService {
 
+    private final FxRateClient fxRateClient;
+
     private static final Logger log = LoggerFactory.getLogger(TransactionService.class);
 
     private final TransactionRepository transactionRepository;
     private  final LedgerEntryRepository ledgerEntryRepository;
     private final AccountRepository accountRepository;
+    private final ApplicationEventPublisher publisher;
 
     public TransactionService(TransactionRepository transactionRepository,
                               LedgerEntryRepository ledgerEntryRepository,
-                              AccountRepository accountRepository) {
+                              AccountRepository accountRepository,
+                              ApplicationEventPublisher publisher, FxRateClient fxRateClient) {
         this.transactionRepository = transactionRepository;
         this.ledgerEntryRepository = ledgerEntryRepository;
         this.accountRepository = accountRepository;
+        this.publisher = publisher;
+        this.fxRateClient = fxRateClient;
     }
 
     @Transactional
@@ -82,6 +93,8 @@ public class TransactionService {
         ledgerEntryRepository.save(debitEntry);
 
         transaction.postedTransaction();
+        TransactionPostedEvent event = buildPostedEvent(transaction, List.of(creditEntry, debitEntry));
+        publisher.publishEvent(event);
 
         log.info("Posted deposit transaction id={} accountId={} cashAccountId={} amount={} currency={}",
                 transaction.getId(), destinationAccount.getId(), cashAccount.getId(), request.amount(), request.currency());
@@ -141,6 +154,8 @@ public class TransactionService {
         ledgerEntryRepository.save(creditEntry);
 
         transaction.postedTransaction();
+        TransactionPostedEvent event = buildPostedEvent(transaction, List.of(creditEntry, debitEntry));
+        publisher.publishEvent(event);
 
         log.info("Posted withdraw transaction id={} accountId={} cashAccountId={} amount={} currency={}",
                 transaction.getId(), destinationAccount.getId(), cashAccount.getId(), request.amount(), request.currency());
@@ -157,7 +172,10 @@ public class TransactionService {
         if (existing.isPresent()) {
             log.info("Transfer replay for idempotencyKey={} -> returning existing transaction id={}",
                     request.idempotencyKey(), existing.get().getId());
-            return TransactionResponse.from(existing.get());
+            List<LedgerEntry> exitLedgers = ledgerEntryRepository.findByTransactionId(existing.get().getId());
+            LedgerEntry creditLedger = exitLedgers.stream().filter(e -> e.getDirection().equals(TransactionDirection.CREDIT)).findFirst().get();
+            LedgerEntry debitLedger = exitLedgers.stream().filter(e -> e.getDirection().equals(TransactionDirection.DEBIT)).findFirst().get();
+            return TransactionResponse.fromTransfer(existing.get(), debitLedger.getAmount(), debitLedger.getCurrency(), creditLedger.getAmount(), creditLedger.getCurrency());
         }
 
         if (request.amount() <= 0) {
@@ -169,8 +187,12 @@ public class TransactionService {
             throw new IllegalArgumentException("cannot transfer to the same account");
         }
 
-        Account toAccount;
-        Account fromAccount;
+        Account toAccount = findAccountByIdOrElseThrow(request.toAccountId());
+        Account fromAccount = findAccountByIdOrElseThrow(request.fromAccountId());
+
+        FxDetails fx = resolveTransferAmounts(fromAccount, toAccount, request);
+
+        Long destinationAmount = fx.destinationAmount();
 
         // Two accounts get locked here, so lock ordering matters: always lock the lower account id
         // first regardless of which side is source/destination. Without this, two transfers between
@@ -208,17 +230,19 @@ public class TransactionService {
         // No system/cash account here - a transfer only ever moves money between two real
         // accounts inside the bank's own ledger.
         LedgerEntry debitEntry = new LedgerEntry(transaction, fromAccount, TransactionDirection.DEBIT, request.amount(), request.currency());
-        LedgerEntry creditEntry = new LedgerEntry(transaction, toAccount, TransactionDirection.CREDIT, request.amount(), request.currency());
+        LedgerEntry creditEntry = new LedgerEntry(transaction, toAccount, TransactionDirection.CREDIT, destinationAmount, fx.destinationCurrency());
 
         ledgerEntryRepository.save(debitEntry);
         ledgerEntryRepository.save(creditEntry);
 
         transaction.postedTransaction();
+        TransactionPostedEvent event = buildPostedEvent(transaction, List.of(creditEntry, debitEntry));
+        publisher.publishEvent(event);
 
         log.info("Posted transfer transaction id={} from accountId={} to AccountId={} amount={} currency={}",
                 transaction.getId(), fromAccount.getId(), toAccount.getId(), request.amount(), request.currency());
 
-        return TransactionResponse.from(transaction);
+        return TransactionResponse.fromTransfer(transaction, fx.sourceAmount(), fx.sourceCurrency(), fx.destinationAmount(), fx.destinationCurrency());
     }
 
     @Transactional
@@ -268,6 +292,7 @@ public class TransactionService {
         // Mirror every original entry onto the new transaction with direction flipped, so the
         // original and its reversal sum to zero once both exist. The original entries themselves
         // are never touched - the ledger is append-only.
+        List<LedgerEntry> reversalEntries = new ArrayList<>();
         for (LedgerEntry entry: ledgerEntries) {
             TransactionDirection direction = TransactionDirection.CREDIT;
             if (entry.getDirection().equals(direction)) {
@@ -276,10 +301,13 @@ public class TransactionService {
 
             LedgerEntry ledgerEntry = new LedgerEntry(reverseTransaction, entry.getAccount(), direction, entry.getAmount(), entry.getCurrency());
             ledgerEntryRepository.save(ledgerEntry);
+            reversalEntries.add(ledgerEntry);
         }
 
         reverseTransaction.postedTransaction();
         transaction.markStatusReversed();
+        TransactionPostedEvent event = buildPostedEvent(reverseTransaction, reversalEntries);
+        publisher.publishEvent(event);
 
         log.info("Posted reverse transaction id={} originalTransactionId={} entriesReversed={}",
                 reverseTransaction.getId(), transaction.getId(), ledgerEntries.size());
@@ -320,10 +348,11 @@ public class TransactionService {
         }
     }
 
-    // Both accounts must match the request currency (and therefore each other) - there's no FX
-    // conversion, so a mismatch on either side has to be rejected, not just when both disagree.
+    // Only the source account's currency must match the request - the destination account is
+    // allowed to differ, in which case resolveTransferAmounts has already converted the amount
+    // via fx-service before locks were acquired.
     private void checkCurrencyMatchForTransferOrElseThrow(Account to, Account from, TransferRequest request) {
-        if (!request.currency().equals(to.getCurrency()) || !request.currency().equals(from.getCurrency())) {
+        if (!request.currency().equals(from.getCurrency())) {
             throw new IllegalArgumentException("currency mismatch, source account currency: " + from.getCurrency() + ", destination account currency: " + to.getCurrency()
             + ", request currency: " + request.currency());
         }
@@ -349,5 +378,64 @@ public class TransactionService {
     private Account findAccountForUpdateOrElseThrow(Integer id) {
         return accountRepository.findByIdForUpdate(id)
                 .orElseThrow(() -> new NoSuchElementException("account does not exist:" + id));
+    }
+
+    private Account findAccountByIdOrElseThrow(Integer id) {
+        return accountRepository.findById(id)
+                .orElseThrow(() -> new NoSuchElementException("account does not exist:" + id));
+    }
+
+    private TransactionPostedEvent buildPostedEvent(Transaction transaction, List<LedgerEntry> ledgerEntryList) {
+        LedgerEntry primary;
+        LedgerEntry counterparty;
+        List<LedgerEntry> entries = ledgerEntryList.stream().filter(entry -> !AccountType.SYSTEM.equals(entry.getAccount().getType())).toList();
+
+        if (entries.size() == 1) {
+            primary = entries.getFirst();
+            counterparty = null;
+        } else if (entries.size() == 2) {
+            if (TransactionDirection.DEBIT.equals(entries.getFirst().getDirection())) {
+                primary = entries.get(0);
+                counterparty = entries.get(1);
+            } else {
+                primary = entries.get(1);
+                counterparty = entries.get(0);
+            }
+        } else {
+            throw new IllegalStateException("transaction id=" + transaction.getId() + " has illegal ledger entries");
+        }
+
+
+        return new TransactionPostedEvent(
+            transaction.getId(),
+            transaction.getType(),
+            transaction.getStatus(),
+                primary.getAmount(),
+                primary.getCurrency(),
+                primary.getAccount().getId(),
+                primary.getAccount().getUser().getId(),
+                counterparty == null ? null : counterparty.getAccount().getId(),
+                counterparty == null ? null : counterparty.getAccount().getUser().getId());
+    }
+
+    private record FxDetails(
+        Long sourceAmount, 
+        String sourceCurrency, 
+        Long destinationAmount, 
+        String destinationCurrency
+    ) {}
+
+
+    private FxDetails resolveTransferAmounts (Account fromAccount, Account toAccount, TransferRequest request) {
+        if (toAccount.getCurrency().equals(fromAccount.getCurrency())) {
+           return new FxDetails(request.amount(), fromAccount.getCurrency(), request.amount(), toAccount.getCurrency());
+        }
+
+        BigDecimal rate = fxRateClient.getRate(fromAccount.getCurrency(), toAccount.getCurrency());
+        BigDecimal sourceAmount = BigDecimal.valueOf(request.amount());
+        BigDecimal destinationAmountDecimal = sourceAmount.multiply(rate);
+        Long destination = destinationAmountDecimal.setScale(0, RoundingMode.HALF_UP).longValueExact();
+
+        return new FxDetails(request.amount(), fromAccount.getCurrency(), destination, toAccount.getCurrency());
     }
 }

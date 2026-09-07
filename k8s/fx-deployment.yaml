@@ -1,0 +1,23 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  namespace: banking
+  name: fx
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: fx
+  template:
+    metadata:
+      labels:
+        app: fx
+    spec:
+      containers:
+        - name: fx
+          image: fx-service:local
+          imagePullPolicy: Never
+          ports:
+            - containerPort: 9092
+
+    
