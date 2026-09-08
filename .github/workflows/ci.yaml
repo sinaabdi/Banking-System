@@ -118,11 +118,15 @@ jobs:
 
     strategy:
       matrix:
-        app:
-          - banking
-          - fx-service
-          - notification-service
-          - fraud-service
+        include:
+          - app: banking
+            image: banking-core
+          - app: fx-service
+            image: fx-service
+          - app: notification-service
+            image: notification-service
+          - app: fraud-service
+            image: fraud-service
 
     steps:
       - name: Checkout
@@ -146,5 +150,5 @@ jobs:
         with:
           context: ${{ matrix.app }}
           push: true
-          tags: ghcr.io/${{ github.repository_owner }}/${{ matrix.app }}:${{ github.sha }}
+          tags: ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}:${{ github.sha }}
      
