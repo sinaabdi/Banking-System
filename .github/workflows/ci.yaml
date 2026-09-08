@@ -1,0 +1,104 @@
+name: Build and Deploy Banking Application
+
+on:
+  push:
+    branches:
+      - gitops-dev
+    tags:
+      - 'action'
+
+jobs:
+  java-test:
+    name: Test & Build Core Banking
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_USER: postgres
+          POSTGRES_DB: core_banking
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+      rabbitmq:
+        image: rabbitmq:4-management
+        ports:
+          - 15672:15672
+          - 5672:5672
+        options: >-
+          --health-cmd="rabbitmq-diagnostics -q ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      # Postgres
+      DB_URL: localhost
+      DB_PORT: 5432
+      DB_USERNAME: postgres
+      DB_PASSWORD: postgres
+      DB_NAME: core_banking
+      # Notification
+      NOTIFICATION_SERVICE_URL: http://localhost:9090
+      NOTIFICATION_QUEUE_NAME: notification.transaction-events
+      #RabbitMQ
+      RABBITMQ_HOST: localhost
+      RABBITMQ_PORT: 5672
+      RABBITMQ_USERNAME: guest
+      RABBITMQ_PASSWORD: guest
+      FANOUT_EXCHANGE_NAME: banking.transaction-events
+      # Fraud
+      LARGE_AMOUNT_THRESHOLD: 1000000
+      VELOCITY_WINDOW_SECONDS: 60
+      VELOCITY_MAX_COUNT: 5
+      FRAUD_QUEUE_NAME: fraud.transaction-events
+      # FX
+      FX_SERVICE_URL: http://localhost:9092
+
+    steps:
+      - name: Get code from Github
+        uses: actions/checkout@v4
+
+      - name: Setup Java JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'eclipse-temurin'
+          java-version: '25'
+          cache: 'gradle'
+
+      - name: Build and Test with Gradle
+        working-directory: ./banking
+        run: ./gradlew build
+
+  go-test:
+    name: Test & Build Go Services (Notification/Fraud/FX)
+    runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        app:
+          - fx-service
+          - notification-service
+          - fraud-service
+
+    steps:
+      - name: Get code from Github
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: '1.25'
+      
+      - name: Test ${{ matrix.app }}
+        working-directory: ${{ matrix.app }}
+        run: go test ./...
+
+      - name: Build ${{ matrix.app }} Service
+        working-directory: ${{ matrix.app }}
+        run: GO_ENABLED=0 GOOS=linux go build -o ${{ matrix.app }} .
