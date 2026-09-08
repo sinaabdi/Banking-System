@@ -76,7 +76,7 @@ jobs:
         run: ./gradlew build
 
   go-test:
-    name: Test & Build Go Services (Notification/Fraud/FX)
+    name: Test & Build Go Services
     runs-on: ubuntu-latest
 
     strategy:
@@ -94,11 +94,13 @@ jobs:
         uses: actions/setup-go@v4
         with:
           go-version: '1.25'
+          cache: true
+          cache-dependency-path: '${{ matrix.app }}/go.sum'
       
       - name: Test ${{ matrix.app }}
         working-directory: ${{ matrix.app }}
-        run: go test ./...
+        run: go test -v ./...
 
       - name: Build ${{ matrix.app }} Service
         working-directory: ${{ matrix.app }}
-        run: GO_ENABLED=0 GOOS=linux go build -o ${{ matrix.app }} .
+        run: GO_ENABLED=0 GOOS=linux go build -v -o ${{ matrix.app }} .
