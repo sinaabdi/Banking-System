@@ -112,6 +112,9 @@ jobs:
       - go-test
     runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/gitops-dev'
+    permissions:
+      contents: read
+      packages: write
 
     strategy:
       matrix:
