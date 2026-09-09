@@ -15,7 +15,7 @@ spec:
     spec:
       containers:
         - name: core
-          image: ghcr.io/sinaabdi/banking-core:de7c541434e04664c8f87001f751d6d20152b87d
+          image: ghcr.io/sinaabdi/banking-core:f3e2de8b4e8ade9e0cffd71d6794cf05587f3a9f
           ports:
             - containerPort: 8080
           readinessProbe:
