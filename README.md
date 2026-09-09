@@ -4,10 +4,12 @@ A double-entry bookkeeping banking API, built with Spring Boot as a learning pro
 longer-term plan toward a polyglot microservices system (Go/Rust/Python, Redis, MQ, Kubernetes,
 GitOps CI/CD). Phase 1 covers a single monolithic service: users, accounts, deposits/withdrawals/
 transfers/reversals, JWT authentication, and role/ownership-based authorization. Phase 2 is underway -
-Docker/Kubernetes deployment, RabbitMQ, and three companion Go microservices: two that react to every
+Docker/Kubernetes deployment, RabbitMQ, three companion Go microservices: two that react to every
 posted transaction independently, [notification service](#notification-service) and
 [fraud-scoring service](#fraud-scoring-service), and one `core` calls synchronously for cross-currency
-transfers, the [FX-rate service](#fx-rate-service).
+transfers, the [FX-rate service](#fx-rate-service) - and a full [CI/CD pipeline](#cicd-pipeline) that
+automatically tests, builds, and deploys every change: GitHub Actions builds and pushes images to GHCR,
+and [ArgoCD](#gitops-deployment-argocd) syncs the cluster to match, with no manual `kubectl` involved.
 
 For the design decisions behind how this is built - the ledger model, concurrency strategy, and
 authentication/authorization - see [architucture.md](architucture.md).
@@ -28,6 +30,9 @@ authentication/authorization - see [architucture.md](architucture.md).
 - Synchronous HTTP (`RestClient`) from `core` to the FX-rate service, for cross-currency transfers -
   the one place a Go service isn't a RabbitMQ consumer, since a rate lookup is a data dependency
   `core` needs an answer to before it can proceed, not a side-effect notification
+- GitHub Actions - tests every push, builds and pushes images to GHCR on `main`/a `deploy` tag
+- GHCR (GitHub Container Registry) - all 4 images, tagged by git SHA
+- ArgoCD - in-cluster GitOps controller, auto-syncs the cluster to match `k8s/` on every deploy
 
 ## Running it locally
 
@@ -59,21 +64,20 @@ Listens on `:9092`. See [FX-Rate Service](#fx-rate-service) below.
 
 ## Running it with Docker Compose
 
-Alternatively, run the whole stack - app, notification service, fraud-scoring service, Postgres, and
-RabbitMQ - in containers, no local JDK/Gradle/Go needed. **fx-service isn't part of this yet** - it has
-no `Dockerfile` or Compose entry, so cross-currency transfers won't work against this stack until it's
-run separately on the host (`cd fx-service && go run main.go`); same-currency transfers are unaffected:
+Alternatively, run the whole stack - app, notification service, fraud-scoring service, FX-rate service,
+Postgres, and RabbitMQ - in containers, no local JDK/Gradle/Go needed:
 ```bash
 docker compose up --build
 ```
 Each service builds from its own `Dockerfile` (`banking/Dockerfile`, `notification-service/Dockerfile`,
-`fraud-service/Dockerfile` - a multi-stage build per service: compile with the full JDK/Go toolchain,
-run with just a JRE/a bare Alpine image). Compose starts Postgres and RabbitMQ first, waits for both to
-actually be ready to accept connections (not just for their containers to start), then starts `core`,
-`notification`, and `fraud` - the two Go services start independently of each other and of `core`, each
-only waiting on RabbitMQ itself (see [architucture.md](architucture.md#containerization) for why
-that's the only real startup dependency here). The API is up at `http://localhost:8080`, same as the
-local workflow; RabbitMQ's management UI is at `http://localhost:15672` (`guest`/`guest`).
+`fraud-service/Dockerfile`, `fx-service/Dockerfile` - a multi-stage build per service: compile with the
+full JDK/Go toolchain, run with just a JRE/a bare Alpine image). Compose starts Postgres and RabbitMQ
+first, waits for both to actually be ready to accept connections (not just for their containers to
+start), then starts `core`, `notification`, `fraud`, and `fx` - the three Go services start
+independently of each other and of `core`; `notification`/`fraud` each only wait on RabbitMQ, and `fx`
+waits on nothing at all (see [architucture.md](architucture.md#containerization) for why that's the
+only real startup dependency here). The API is up at `http://localhost:8080`, same as the local
+workflow; RabbitMQ's management UI is at `http://localhost:15672` (`guest`/`guest`).
 
 The containerized services get their settings from the `.env` file at the repo root
 (`DB_URL=postgres`, `RABBITMQ_HOST=rabbitmq`, etc. - Compose's internal DNS resolves these to the
@@ -82,23 +86,30 @@ right containers) instead of each service's own `localhost` defaults, which stay
 
 ## Running it on Kubernetes
 
-The manifests in [k8s/](k8s/) deploy the same app + Postgres onto any cluster - developed and tested
-against a local [minikube](https://minikube.sigs.k8s.io/) cluster (`docker` driver). fx-service has no
-manifests yet, same gap as Docker Compose above - cross-currency transfers won't work in-cluster until
-that's added.
+The manifests in [k8s/](k8s/) deploy the whole stack (app + all three Go services + Postgres +
+RabbitMQ) onto any cluster - developed and tested against a local
+[minikube](https://minikube.sigs.k8s.io/) cluster (3 nodes, `docker` driver). **The real deployment
+path is now automated** - see [CI/CD Pipeline](#cicd-pipeline) below: push to `main` (or a `deploy`
+tag) and GitHub Actions + ArgoCD get the new code running with no `kubectl` involved at all. What
+follows here is the manual path - still fully working, useful for a first-time cluster bootstrap or
+quick local testing outside the pipeline.
 
-**1. Build all three app images and load them into the cluster** (minikube doesn't see your local
-Docker images by default - `minikube image load` copies them in):
+**1. Build the 4 app images and load them into the cluster** (minikube doesn't see your local Docker
+images by default - `minikube image load` copies them in):
 ```bash
 docker build -t banking-core:local ./banking
 docker build -t banking-notification:local ./notification-service
 docker build -t banking-fraud:local ./fraud-service
+docker build -t fx-service:local ./fx-service
 minikube image load banking-core:local
 minikube image load banking-notification:local
 minikube image load banking-fraud:local
+minikube image load fx-service:local
 ```
 Rebuilding after a code change isn't enough on its own - see the note on `imagePullPolicy: Never`
-below the verification steps.
+below the verification steps. (This only applies to these locally-tagged `:local` images built by
+hand; images the pipeline builds and pushes to GHCR are tagged by git SHA and pulled normally - see
+[CI/CD Pipeline](#cicd-pipeline).)
 
 **2. Create `k8s/secret.yaml`** - it's gitignored on purpose (base64 isn't encryption; see
 [architucture.md](architucture.md#kubernetes-deployment)), so it isn't in the repo. Create it
@@ -127,7 +138,8 @@ native Windows, or both WSL - mixing the two can silently fail to connect).
   `banking-core:local` and re-running `minikube image load` isn't always enough by itself - if pods
   are still running on the old image, the node may not actually swap it in. Safe sequence:
   `kubectl scale deployment/<name> -n banking --replicas=0`, remove the old image on each node
-  (`minikube ssh -n <node> -- docker rmi <image>:local`), reload, then scale back up.
+  (`minikube ssh -n <node> -- docker rmi <image>:local`), reload, then scale back up. (This whole
+  dance is exactly what the CI/CD pipeline below exists to eliminate for the real deploy path.)
 - After editing `k8s/config.yaml`, `kubectl apply -f k8s/config.yaml` has to actually be re-run - a
   pod referencing a `ConfigMap` key that doesn't exist yet in the cluster fails with
   `CreateContainerConfigError`, even though the key is right there in the file on disk. Editing the
@@ -137,6 +149,43 @@ native Windows, or both WSL - mixing the two can silently fail to connect).
   just documented as a one-time risk: `RabbitMQConfig` declares the exchange eagerly at startup, before
   the app can accept any request at all. See
   [architucture.md](architucture.md#notification-service) for how.
+
+## CI/CD pipeline
+
+[.github/workflows/ci.yaml](.github/workflows/ci.yaml) tests every push (any branch), and on `main`
+or a `deploy*` tag, builds and pushes all 4 images to GHCR, then commits the new tags into `k8s/`
+itself - which **ArgoCD**, running inside the cluster, picks up and syncs automatically. Nobody runs
+`kubectl apply` for a real deploy anymore.
+
+The whole chain, in order: push -> `java-test`/`go-test` (real Postgres/RabbitMQ containers for Java,
+a build+test matrix across the three Go services) -> `build-and-push` (GHCR, tagged by git SHA) ->
+`deployment` (bumps `k8s/*-deployment.yaml`'s image tags, commits with `[skip ci]` so it doesn't
+retrigger itself) -> ArgoCD notices the new commit on its own and rolls out new pods. See
+[architucture.md](architucture.md#cicd-pipeline-github-actions) for the full design, including several
+real bugs caught and fixed while building it (a GitHub Actions networking gotcha, an `options:`
+quoting bug, a matrix/hardcoded-step mixup, a wrong `Dockerfile` path resolution, a missing registry
+prefix on an image tag, and a two-layer permissions issue).
+
+## GitOps deployment (ArgoCD)
+
+[argocd/argocd-application.yaml](argocd/argocd-application.yaml) defines the `Application` ArgoCD
+syncs from - this repo's `k8s/` directory on `main`, into the cluster's `banking` namespace,
+auto-syncing with self-heal (a manual out-of-band change gets reverted back to match git) and pruning
+(deleting a manifest deletes the resource too). It's a Custom Resource living in its own `argocd`
+namespace (installed separately, `kubectl create namespace argocd` + ArgoCD's official install
+manifest) - not inside `k8s/` itself, so it stays under direct manual control rather than being synced
+by the very automation it defines. See
+[architucture.md](architucture.md#gitops-deployment-argocd) for why an in-cluster, poll-outward
+controller is actually a better fit here than a push-based approach, given this cluster is local and
+only sometimes running.
+
+Access the UI (not exposed externally by default):
+```bash
+kubectl port-forward svc/argocd-server -n argocd 8080:443
+kubectl get secret argocd-initial-admin-secret -n argocd -o jsonpath='{.data.password}' | base64 -d
+```
+Then open `https://localhost:8080` (self-signed cert, browser warning expected) and log in as `admin`
+with that password.
 
 ## Notification service
 
@@ -281,8 +330,13 @@ fx-service/
   main.go        Go FX-rate service - simulated rate table + drift, GET /rate, GET /rates
   main_test.go   first Go tests in this project (triangulation math, drift bounds)
   go.mod/go.sum
-  (no Dockerfile yet - not containerized/deployed to k8s in this stage)
+  Dockerfile     multi-stage build for this service
 
-k8s/   Kubernetes manifests for every service above except fx-service, including rabbitmq-*.yaml and
-       fraud-*.yaml
+.github/workflows/ci.yaml   GitHub Actions - test on every push, build/push to GHCR and deploy on
+                             main/a deploy tag (see CI/CD pipeline above)
+
+argocd/argocd-application.yaml   the ArgoCD Application - deliberately outside k8s/, see GitOps
+                                   deployment above for why
+
+k8s/   Kubernetes manifests for every service above, including rabbitmq-*.yaml and fraud-*.yaml
 ```

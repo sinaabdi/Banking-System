@@ -186,10 +186,11 @@ A single `GlobalExceptionHandler` maps exceptions to HTTP responses: `NoSuchElem
 ## Containerization
 
 Each service has its own `Dockerfile`, colocated in its own directory (`banking/Dockerfile`,
-`notification-service/Dockerfile`, `fraud-service/Dockerfile`) with its own `.dockerignore`, not one
-shared root-level Dockerfile per service distinguished by suffix. This scales better as more services
-get added, and it means each service's `docker-compose.yml` `build.context` points at that service's
-own directory, so its Dockerfile's `COPY` paths are relative to itself rather than the repo root.
+`notification-service/Dockerfile`, `fraud-service/Dockerfile`, `fx-service/Dockerfile`) with its own
+`.dockerignore`, not one shared root-level Dockerfile per service distinguished by suffix. This scales
+better as more services get added, and it means each service's `docker-compose.yml` `build.context`
+points at that service's own directory, so its Dockerfile's `COPY` paths are relative to itself rather
+than the repo root.
 
 `banking/Dockerfile` is a two-stage build:
 1. **`builder`** (`eclipse-temurin:25-jdk-*`) - copies the Gradle wrapper and `build.gradle` first and
@@ -199,17 +200,24 @@ own directory, so its Dockerfile's `COPY` paths are relative to itself rather th
    `COPY --from=builder`. No JDK, no Gradle, no source ever reaches this image - just a JRE and one
    jar.
 
-`notification-service/Dockerfile` and `fraud-service/Dockerfile` both follow the same shape with Go's
-toolchain instead: a `golang:*-alpine` builder stage runs `go build`, and a bare `alpine` runtime stage
-copies out just the compiled binary - no Go toolchain or source in the final image either.
+`notification-service/Dockerfile`, `fraud-service/Dockerfile`, and `fx-service/Dockerfile` all follow
+the same shape with Go's toolchain instead: a `golang:*-alpine` builder stage runs `go build`, and a
+bare `alpine` runtime stage copies out just the compiled binary - no Go toolchain or source in the
+final image either. (A real bug caught while writing `fx-service/Dockerfile`: its runtime stage
+originally `COPY --from=builder`'d `/app/fraud` - a copy-paste leftover from `fraud-service/Dockerfile`
+- while the builder stage actually built `/app/fx`. Docker failed the build outright with `"/app/fraud":
+not found`, proven directly rather than assumed, and fixed by copying the binary the builder stage
+actually produces.)
 
-`docker-compose.yml` runs `core`, `notification`, `fraud`, `postgres`, and `rabbitmq` together, all on a
-`backend` bridge network so Compose's internal DNS resolves each by service name - unlike the host
-workflow, `localhost` inside any one container means that container itself, not any of the others.
-`core`, `notification`, and `fraud` only `depends_on` the services they actually need to be up first -
-`notification` and `fraud` each just need RabbitMQ, not each other and not `core` - since a fanout
-consumer's only real startup dependency is the broker itself; chaining them onto `core` would
-reintroduce the exact coupling this design exists to remove.
+`docker-compose.yml` runs `core`, `notification`, `fraud`, `fx`, `postgres`, and `rabbitmq` together,
+all on a `backend` bridge network so Compose's internal DNS resolves each by service name - unlike the
+host workflow, `localhost` inside any one container means that container itself, not any of the
+others. `core`, `notification`, `fraud`, and `fx` only `depends_on` the services they actually need to
+be up first - `notification` and `fraud` each just need RabbitMQ, not each other and not `core`, since
+a fanout consumer's only real startup dependency is the broker itself; `fx` needs nothing at all, not
+even RabbitMQ, since it never touches the transaction-events exchange (see
+[FX-Rate Service](#fx-rate-service)) - chaining any of them onto `core` would reintroduce the exact
+coupling this design exists to remove.
 
 This is why `application.properties`'s datasource/RabbitMQ settings are `${DB_URL:localhost}`-style
 placeholders (and, on the Go side, `os.Getenv` with a hardcoded fallback, since Go has no built-in
@@ -242,11 +250,20 @@ retries a failed initial connection.
   resolve correctly via Kubernetes' internal DNS, with zero app-side changes from the Docker stage.
 - **`core`** - the app `Deployment`, 2 replicas (scheduled across the two worker nodes, demonstrating
   the cluster actually load-balancing rather than just running single-node), exposed via a `NodePort`
-  `Service`. `imagePullPolicy: Never` on the container, since the image is loaded locally
-  (`minikube image load`) rather than pulled from a registry - the default policy for an untagged/
-  `:latest` image is `Always`, which would otherwise send kubelet looking for it on Docker Hub and
-  fail permanently. Its `env` also carries `RABBITMQ_HOST`/`RABBITMQ_PORT`/`RABBITMQ_USERNAME`/
-  `FANOUT_EXCHANGE_NAME` (from `banking-config`) and `RABBITMQ_PASSWORD` (from `banking-secret`).
+  `Service`. Its `env` also carries `RABBITMQ_HOST`/`RABBITMQ_PORT`/`RABBITMQ_USERNAME`/
+  `FANOUT_EXCHANGE_NAME`/`FX_SERVICE_URL` (from `banking-config`) and `RABBITMQ_PASSWORD` (from
+  `banking-secret`). Now pulls a real `ghcr.io/sinaabdi/banking-core:<git-sha>` image (see
+  [CI/CD Pipeline](#cicd-pipeline-github-actions) below) rather than a locally-loaded one - see that
+  section for how `imagePullPolicy: Never` and manual `minikube image load` were retired in favor of
+  this, and are kept only as a manual local-testing fallback.
+- **`fx`** - **`replicas: 1`, deliberately**, for yet another reason than `rabbitmq`'s or `fraud`'s:
+  each pod keeps its own independent, in-memory, independently-drifting rate table with no shared
+  store between replicas. With 2+ replicas, two clients hitting `GET /rate` at the same instant could
+  get two genuinely different answers depending purely on which pod the `Service` happened to route
+  to - not because time passed, but because the pods' drift diverged independently. A real fix (a
+  shared store like Redis, one process owning the drift) is deferred - `replicas: 1` sidesteps the
+  inconsistency entirely for now, and a single Go HTTP server doing a mutex-guarded map lookup handles
+  far more throughput than this project will ever generate.
 - **`rabbitmq`** - **`replicas: 1`, deliberately, not 2.** Unlike `core`/`notification`, RabbitMQ isn't
   stateless - running 2 replicas via a plain `Deployment` with no clustering configuration would give
   two completely independent, unconnected broker instances, each with their own separate exchanges and
@@ -278,9 +295,13 @@ retries a failed initial connection.
 state like Postgres reachability, not just "the JVM didn't crash"). Both are permitted in
 `SecurityConfig` alongside `/api/auth/**`, since the kubelet calling them has no JWT to send.
 
-**Image distribution to a multi-node cluster**: `eval $(minikube docker-env)` only points at one
-node's Docker daemon, insufficient for a multi-node cluster - `minikube image load` is the tool that
-actually loads a locally-built image onto every node.
+**Image distribution to a multi-node cluster (manual fallback only, superseded by the pipeline below)**:
+`eval $(minikube docker-env)` only points at one node's Docker daemon, insufficient for a multi-node
+cluster - `minikube image load` is the tool that actually loads a locally-built image onto every node.
+Everything in this subsection was the *only* way images reached the cluster before
+[CI/CD Pipeline](#cicd-pipeline-github-actions) and [GitOps Deployment](#gitops-deployment-argocd)
+existed; it's kept working deliberately, purely for quick manual testing without going through the
+pipeline - the real deployment path no longer touches any of it.
 
 **Host access on the `docker` driver**: unlike a Linux-native setup, `NodePort`/node-IP access isn't
 directly routable from the host on Windows/WSL with the `docker` driver - `minikube service <name>
@@ -559,6 +580,121 @@ pattern as `notification.service.url`, not a host+port split, since nothing here
 from separate parts). `fx-service` itself takes no configuration at all - no database, no RabbitMQ, no
 external dependency of any kind.
 
-**Not yet done, deliberately deferred**: `fx-service` has no `Dockerfile`, no `docker-compose.yml`
-entry, and no `k8s/` manifests yet - unlike `notification-service`/`fraud-service`, which are fully
-covered by both. This stage was scoped to the Java/Go application code and its tests only.
+**Containerization/Kubernetes wiring**, originally deferred here, was completed in a follow-on stage -
+`fx-service` now has its own `Dockerfile`, `docker-compose.yml` entry, and `k8s/` manifests
+(`fx-deployment.yaml`/`fx-service.yaml`), fully covered the same as `notification-service`/
+`fraud-service`. See [Containerization](#containerization) and [Kubernetes Deployment](#kubernetes-deployment)
+above.
+
+## CI/CD Pipeline (GitHub Actions)
+
+[.github/workflows/ci.yaml](.github/workflows/ci.yaml) automates what used to be an entirely manual
+sequence: `docker build` -> `minikube image load` -> (if replacing a running image) scale-to-0 ->
+remove the old image on every node -> reload -> scale back up -> `kubectl apply -f k8s/`. Four jobs:
+
+- **`java-test`**: `./gradlew build` (which runs `check`/`test` internally) against **real Postgres and
+  RabbitMQ containers** via GitHub Actions' `services:` block - not mocks, for the same reason
+  `TransactionServiceConcurrencyTest` needs a real database locally (see
+  [Concurrency](#concurrency)): the pessimistic-locking guarantee and full-Spring-context tests
+  (`BankingApplicationTests`) can't be verified any other way.
+  - **A real networking bug caught here**: the job's `env` originally pointed `DB_URL`/`RABBITMQ_HOST`
+    at the service block's own key names (`postgres`, `rabbitmq`) - which only resolve as DNS hostnames
+    when the *job itself* also runs inside a container on the same Docker network GitHub creates for
+    that case. This job has no `container:` key, so its steps run directly on the bare runner VM, where
+    service containers are reachable only via `localhost:<mapped-port>` instead. Fixed by pointing both
+    at `localhost`.
+  - **A real `options:` quoting bug**: GitHub's `options:` field is appended as raw arguments to
+    `docker create`, unlike Compose's `healthcheck.test:` (a plain YAML string). An unquoted multi-word
+    `--health-cmd rabbitmq-diagnostics -q ping ...` gets tokenized word-by-word by Docker's own CLI
+    parser - proven directly with a real `docker create` call, which got confused badly enough to try
+    pulling an image literally named `ping` instead of `rabbitmq:4-management`. Fixed by quoting the
+    whole health command as one string: `--health-cmd="rabbitmq-diagnostics -q ping"`.
+- **`go-test`**: a `strategy.matrix` over `fx-service`/`notification-service`/`fraud-service`, each
+  iteration running `go test ./...` then `go build`. A matrix reruns its *entire* step list once per
+  matrix value, substituting `${{ matrix.app }}` - an early version mixed generic
+  `${{ matrix.app }}`-driven steps with hardcoded per-service ones, which meant every matrix iteration
+  built and tested whichever service happened to be hardcoded, under whichever name the matrix value
+  currently was (e.g. `fraud-service`'s own code getting compiled into a binary named `fx`). Fixed by
+  making every step in the matrix fully generic, none hardcoded to a specific service.
+- **`build-and-push`** (`needs: [java-test, go-test]`, gated `if: github.ref == 'refs/heads/main' ||
+  startsWith(github.ref, 'refs/tags/deploy*')` - only on the deployable branch or an explicit deploy
+  tag, never on every branch/PR): builds and pushes all 4 images to **GHCR** (GitHub Container
+  Registry), chosen specifically because it authenticates with the same `GITHUB_TOKEN` every workflow
+  already gets for free, versus a separate Docker Hub account and a new secret to manage. Images are
+  tagged by **git SHA, not `latest`** - an immutable tag per build is what makes the next job
+  meaningful at all: each deploy is a real, distinct commit pointing at a real, distinct image. A
+  `strategy.matrix.include` list pairs each service's build *context* directory with its desired
+  *image* name separately (`{app: banking, image: banking-core}`, etc.) - necessary because the Java
+  service's directory (`banking/`) and its desired published name (`banking-core`, matching the
+  project's existing local-image naming convention) intentionally differ.
+  - **Two real bugs here, both proven, not assumed**: `docker/build-push-action`'s `file:` input
+    resolves relative to the *repo root*, not `context:` - so an explicit `file: ./Dockerfile` looked
+    for a Dockerfile at the repo root, which doesn't exist (it lives at `<service>/Dockerfile` for
+    every service). Fixed by removing `file:` entirely and letting it default to `{context}/Dockerfile`,
+    which already matches every service's actual layout. Separately, the image tag was missing the
+    `ghcr.io/` registry prefix entirely (`${{ github.actor }}/${{ matrix.image }}:...`) - a tag with no
+    registry host defaults to Docker Hub, not GHCR, despite having just authenticated to `ghcr.io`
+    specifically. Fixed to `ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}:${{ github.sha
+    }}` (also switching from `github.actor`, which varies per triggering user, to
+    `github.repository_owner`, the stable account the images are meant to live under).
+  - **Permissions are layered, and both layers have to agree**: a repo's Settings -> Actions -> General
+    -> "Workflow permissions" radio button sets a *ceiling* on what `GITHUB_TOKEN` can ever do,
+    regardless of what the workflow YAML asks for; the YAML's own `permissions: packages: write` is the
+    *ask*, and needs the repo-level setting to actually allow it. Encountered directly as
+    `denied: installation not allowed to Create organization package` on the first real push - GHCR
+    packages also default to **private**, requiring a one-time manual switch to public in each
+    package's settings so the cluster can pull them without needing `imagePullSecrets`.
+- **`deployment`** (`needs: build-and-push`, deliberately **not** matrixed): bumps all 4 manifests'
+  image tags to the new git SHA and commits the change back to the branch, with `[skip ci]` in the
+  message. Running this from *inside* the matrix job was considered and rejected: 4 parallel matrix
+  iterations each trying to commit and push their own one-file change to the same branch would race
+  each other, since all 4 start from the same base commit and only the first push can ever succeed as
+  a fast-forward. A single, separate, non-matrixed job downstream of the whole matrix sidesteps the
+  race entirely. Without `[skip ci]`, this job's own commit would re-trigger the whole workflow,
+  which would build new images, commit again, trigger again - forever; `[skip ci]` in a commit message
+  is what GitHub Actions itself recognizes to skip firing a new run for that push. (A skipped job
+  cascades: when `build-and-push`'s `if:` evaluates false, `deployment` - which only `needs:` it - is
+  automatically skipped too, with no separate `if:` of its own required on `deployment`.)
+
+## GitOps Deployment (ArgoCD)
+
+[argocd/argocd-application.yaml](argocd/argocd-application.yaml) is what actually gets the new images
+running in the cluster - `kubectl apply -f k8s/` is no longer part of the deploy path at all for
+anything going through the pipeline above.
+
+**Why an in-cluster, pull-based controller fits an intermittently-running local cluster better than a
+push-based approach would.** ArgoCD runs as a set of pods *inside* minikube and polls *outward* to
+GitHub - it never needs anything to reach *into* the cluster from outside. A GitHub Actions runner, by
+contrast, has no route at all into a local cluster sitting behind a home network with no public
+address, so having CI itself run `kubectl apply` directly (a push-based approach) genuinely couldn't
+work here. When minikube is stopped, ArgoCD simply isn't running for a while; when it's started again,
+it resumes and catches up on whatever changed on GitHub in the meantime - a genuinely better fit, not
+just a technology preference.
+
+**The `Application` resource itself is a Custom Resource**, not a built-in Kubernetes type - same YAML
+shape as everything else in `k8s/`, just describing something ArgoCD's own controller watches for
+rather than something the core Kubernetes API understands natively. Two details worth calling out:
+- Its own `metadata.namespace` must be `argocd` (where the controller runs and watches), even though
+  its whole job is describing and managing the `banking` namespace - ArgoCD only watches for
+  `Application` objects living in its own namespace, not the one being managed.
+- It deliberately lives in a separate top-level `argocd/` directory, **not** inside `k8s/` (the
+  `spec.source.path` ArgoCD is told to sync). Had it lived inside `k8s/`, ArgoCD would end up
+  syncing/managing its own `Application` resource as one of the things it watches - harmless in
+  practice (it matches itself, so there's no drift to correct), but it would mean any future change to
+  *this file itself* (like retargeting which branch to track) flows through the same
+  git-commit-then-sync path as every other change, rather than being a deliberate, separate manual
+  `kubectl apply` step under direct control.
+
+**`syncPolicy.automated`** is what makes this actually automatic rather than "shows a diff and waits
+for a human to click Sync" - `selfHeal: true` additionally means a manual, out-of-band change to
+anything in the `banking` namespace gets reverted back to match git on the next reconciliation, and
+`prune: true` means deleting a manifest from `k8s/` deletes the corresponding cluster resource too,
+not just stops tracking it.
+
+**`spec.source.targetRevision`** tracks whichever branch is actually deployable at any given time -
+`gitops-dev` while this pipeline itself was being built and tested, switched to `main` once merged,
+matching `build-and-push`/`deployment`'s own `main`-or-`deploy*`-tag gate. Proven end-to-end for real,
+not just assumed: a genuine push all the way from a code change through CI, image build/push, the
+automated tag-bump commit, to ArgoCD noticing that commit on its own and rolling out new pods - checked
+directly via the `Application`'s `.status.sync.revision` matching the exact new commit SHA, and each
+running pod's actual image tag matching it too, all without a single manual `kubectl` command.
