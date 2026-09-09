@@ -3,9 +3,10 @@ name: Build and Deploy Banking Application
 on:
   push:
     branches:
+      - main
       - gitops-dev
     tags:
-      - 'action'
+      - 'deploy*'
 
 jobs:
   java-test:
@@ -111,7 +112,7 @@ jobs:
       - java-test
       - go-test
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/gitops-dev'
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/deploy')
     permissions:
       contents: read
       packages: write
