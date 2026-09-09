@@ -15,7 +15,7 @@ spec:
     spec:
       containers:
         - name: fx
-          image: ghcr.io/sinaabdi/fx-service:8e7f56cfc8dfe5be7803008987056f1df288bae1
+          image: ghcr.io/sinaabdi/fx-service:0d19b2ebf5fadaba253eddf6d85ec9499d7f004c
           ports:
             - containerPort: 9092
 
