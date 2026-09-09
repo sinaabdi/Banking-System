@@ -1,0 +1,188 @@
+name: Build and Deploy Banking Application
+
+on:
+  push:
+    branches:
+      - main
+      - gitops-dev
+    tags:
+      - 'deploy*'
+
+jobs:
+  java-test:
+    name: Test & Build Core Banking
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_USER: postgres
+          POSTGRES_DB: core_banking
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+      rabbitmq:
+        image: rabbitmq:4-management
+        ports:
+          - 15672:15672
+          - 5672:5672
+        options: >-
+          --health-cmd="rabbitmq-diagnostics -q ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      # Postgres
+      DB_URL: localhost
+      DB_PORT: 5432
+      DB_USERNAME: postgres
+      DB_PASSWORD: postgres
+      DB_NAME: core_banking
+      # Notification
+      NOTIFICATION_SERVICE_URL: http://localhost:9090
+      NOTIFICATION_QUEUE_NAME: notification.transaction-events
+      #RabbitMQ
+      RABBITMQ_HOST: localhost
+      RABBITMQ_PORT: 5672
+      RABBITMQ_USERNAME: guest
+      RABBITMQ_PASSWORD: guest
+      FANOUT_EXCHANGE_NAME: banking.transaction-events
+      # Fraud
+      LARGE_AMOUNT_THRESHOLD: 1000000
+      VELOCITY_WINDOW_SECONDS: 60
+      VELOCITY_MAX_COUNT: 5
+      FRAUD_QUEUE_NAME: fraud.transaction-events
+      # FX
+      FX_SERVICE_URL: http://localhost:9092
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Java JDK
+        uses: actions/setup-java@v5
+        with:
+          distribution: 'temurin'
+          java-version: '25'
+          cache: 'gradle'
+
+      - name: Build and Test with Gradle
+        working-directory: ./banking
+        run: ./gradlew build
+
+  go-test:
+    name: Test & Build Go Services
+    runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        app:
+          - fx-service
+          - notification-service
+          - fraud-service
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: '1.25'
+          cache: true
+          cache-dependency-path: '${{ matrix.app }}/go.sum'
+      
+      - name: Test ${{ matrix.app }}
+        working-directory: ${{ matrix.app }}
+        run: go test -v ./...
+
+      - name: Build ${{ matrix.app }}
+        working-directory: ${{ matrix.app }}
+        run: GO_ENABLED=0 GOOS=linux go build -v -o ${{ matrix.app }} .
+    
+  build-and-push:
+    name: Build and Push Application on GHCR
+    needs:
+      - java-test
+      - go-test
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/deploy')
+    permissions:
+      contents: read
+      packages: write
+
+    strategy:
+      matrix:
+        include:
+          - app: banking
+            image: banking-core
+          - app: fx-service
+            image: fx-service
+          - app: notification-service
+            image: notification-service
+          - app: fraud-service
+            image: fraud-service
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Login to Docker Registry
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build and push ${{ matrix.app }}
+        uses: docker/build-push-action@v7
+        with:
+          context: ${{ matrix.app }}
+          push: true
+          tags: ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}:${{ github.sha }}
+  deployment:
+    needs:
+      - build-and-push
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Configure git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+      
+      - name: Update image tags
+        run: |
+          sed -i "s|image: ghcr.io/sinaabdi/banking-core:.*|image: ghcr.io/sinaabdi/banking-core:${{ github.sha }}|" k8s/app-deployment.yaml
+          sed -i "s|image: ghcr.io/sinaabdi/fx-service:.*|image: ghcr.io/sinaabdi/fx-service:${{ github.sha }}|" k8s/fx-deployment.yaml
+          sed -i "s|image: ghcr.io/sinaabdi/notification-service:.*|image: ghcr.io/sinaabdi/notification-service:${{ github.sha }}|" k8s/notification-deployment.yaml
+          sed -i "s|image: ghcr.io/sinaabdi/fraud-service:.*|image: ghcr.io/sinaabdi/fraud-service:${{ github.sha }}|" k8s/fraud-deployment.yaml
+
+      - name: Commit and push updated manifests
+        run: |
+          git add k8s/
+          git commit -m "Deploy ${{ github.sha }} [skip ci]"
+          git push
+
+
+
+
+
+     
