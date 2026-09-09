@@ -15,8 +15,7 @@ spec:
     spec:
       containers:
         - name: fraud
-          image: banking-fraud:local
-          imagePullPolicy: Never
+          image: ghcr.io/sinaabdi/fraud-service:4987b318363465d2b19ffb9612eebbc77582d57a
           ports:
             - containerPort: 9091
           env:

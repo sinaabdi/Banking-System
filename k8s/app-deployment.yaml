@@ -15,8 +15,7 @@ spec:
     spec:
       containers:
         - name: core
-          image: banking-core:local
-          imagePullPolicy: Never
+          image: ghcr.io/sinaabdi/banking-core:4987b318363465d2b19ffb9612eebbc77582d57a
           ports:
             - containerPort: 8080
           readinessProbe:

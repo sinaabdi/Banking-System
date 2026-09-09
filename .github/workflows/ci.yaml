@@ -151,4 +151,37 @@ jobs:
           context: ${{ matrix.app }}
           push: true
           tags: ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}:${{ github.sha }}
+  deployment:
+    needs:
+      - build-and-push
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Configure git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+      
+      - name: Update image tags
+        run: |
+          sed -i "s|image: ghcr.io/sinaabdi/banking-core:.*|image: ghcr.io/sinaabdi/banking-core:${{ github.sha }}|" k8s/app-deployment.yaml
+          sed -i "s|image: ghcr.io/sinaabdi/fx-service:.*|image: ghcr.io/sinaabdi/fx-service:${{ github.sha }}|" k8s/fx-deployment.yaml
+          sed -i "s|image: ghcr.io/sinaabdi/notification-service:.*|image: ghcr.io/sinaabdi/notification-service:${{ github.sha }}|" k8s/notification-deployment.yaml
+          sed -i "s|image: ghcr.io/sinaabdi/fraud-service:.*|image: ghcr.io/sinaabdi/fraud-service:${{ github.sha }}|" k8s/fraud-deployment.yaml
+
+      - name: Commit and push updated manifests
+        run: |
+          git add k8s/
+          git commit -m "Deploy ${{ github.sha }} [skip ci]"
+          git push
+
+
+
+
+
      
