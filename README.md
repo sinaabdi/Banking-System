@@ -7,9 +7,11 @@ transfers/reversals, JWT authentication, and role/ownership-based authorization.
 Docker/Kubernetes deployment, RabbitMQ, three companion Go microservices: two that react to every
 posted transaction independently, [notification service](#notification-service) and
 [fraud-scoring service](#fraud-scoring-service), and one `core` calls synchronously for cross-currency
-transfers, the [FX-rate service](#fx-rate-service) - and a full [CI/CD pipeline](#cicd-pipeline) that
-automatically tests, builds, and deploys every change: GitHub Actions builds and pushes images to GHCR,
-and [ArgoCD](#gitops-deployment-argocd) syncs the cluster to match, with no manual `kubectl` involved.
+transfers, the [FX-rate service](#fx-rate-service) - plus a read-only Python
+[reporting service](#reporting-service), completing the polyglot lineup for this phase - and a full
+[CI/CD pipeline](#cicd-pipeline) that automatically tests, builds, and deploys every change: GitHub
+Actions builds and pushes images to GHCR, and [ArgoCD](#gitops-deployment-argocd) syncs the cluster to
+match, with no manual `kubectl` involved.
 
 For the design decisions behind how this is built - the ledger model, concurrency strategy, and
 authentication/authorization - see [architucture.md](architucture.md).
@@ -30,8 +32,11 @@ authentication/authorization - see [architucture.md](architucture.md).
 - Synchronous HTTP (`RestClient`) from `core` to the FX-rate service, for cross-currency transfers -
   the one place a Go service isn't a RabbitMQ consumer, since a rate lookup is a data dependency
   `core` needs an answer to before it can proceed, not a side-effect notification
+- Python 3.12, FastAPI + SQLAlchemy 2.0 (ORM) - a read-only reporting/analytics service
+- pandas - CSV export for the reporting service's statement/summary endpoints
+- pytest - reporting service test suite, against a real, isolated test Postgres database
 - GitHub Actions - tests every push, builds and pushes images to GHCR on `main`/a `deploy` tag
-- GHCR (GitHub Container Registry) - all 4 images, tagged by git SHA
+- GHCR (GitHub Container Registry) - all 5 images, tagged by git SHA
 - ArgoCD - in-cluster GitOps controller, auto-syncs the cluster to match `k8s/` on every deploy
 
 ## Running it locally
@@ -65,19 +70,22 @@ Listens on `:9092`. See [FX-Rate Service](#fx-rate-service) below.
 ## Running it with Docker Compose
 
 Alternatively, run the whole stack - app, notification service, fraud-scoring service, FX-rate service,
-Postgres, and RabbitMQ - in containers, no local JDK/Gradle/Go needed:
+reporting service, Postgres, and RabbitMQ - in containers, no local JDK/Gradle/Go/Python needed:
 ```bash
 docker compose up --build
 ```
 Each service builds from its own `Dockerfile` (`banking/Dockerfile`, `notification-service/Dockerfile`,
-`fraud-service/Dockerfile`, `fx-service/Dockerfile` - a multi-stage build per service: compile with the
-full JDK/Go toolchain, run with just a JRE/a bare Alpine image). Compose starts Postgres and RabbitMQ
-first, waits for both to actually be ready to accept connections (not just for their containers to
-start), then starts `core`, `notification`, `fraud`, and `fx` - the three Go services start
-independently of each other and of `core`; `notification`/`fraud` each only wait on RabbitMQ, and `fx`
-waits on nothing at all (see [architucture.md](architucture.md#containerization) for why that's the
-only real startup dependency here). The API is up at `http://localhost:8080`, same as the local
-workflow; RabbitMQ's management UI is at `http://localhost:15672` (`guest`/`guest`).
+`fraud-service/Dockerfile`, `fx-service/Dockerfile`, `reporting-service/Dockerfile` - the Java/Go ones
+are multi-stage builds: compile with the full JDK/Go toolchain, run with just a JRE/a bare Alpine image;
+`reporting-service/Dockerfile` is single-stage instead, since `pip install`-ing into the runtime image
+directly has no separate compiled artifact worth discarding the way a JDK/Go build does). Compose starts
+Postgres and RabbitMQ first, waits for both to actually be ready to accept connections (not just for
+their containers to start), then starts `core`, `notification`, `fraud`, `fx`, and `report` - the four
+non-`core` services start independently of each other and of `core`; `notification`/`fraud` each only
+wait on RabbitMQ, `report` only waits on Postgres, and `fx` waits on nothing at all (see
+[architucture.md](architucture.md#containerization) for why that's the only real startup dependency
+here). The API is up at `http://localhost:8080`, same as the local workflow; RabbitMQ's management UI is
+at `http://localhost:15672` (`guest`/`guest`); the reporting service is at `http://localhost:9093`.
 
 The containerized services get their settings from the `.env` file at the repo root
 (`DB_URL=postgres`, `RABBITMQ_HOST=rabbitmq`, etc. - Compose's internal DNS resolves these to the
@@ -86,25 +94,27 @@ right containers) instead of each service's own `localhost` defaults, which stay
 
 ## Running it on Kubernetes
 
-The manifests in [k8s/](k8s/) deploy the whole stack (app + all three Go services + Postgres +
-RabbitMQ) onto any cluster - developed and tested against a local
+The manifests in [k8s/](k8s/) deploy the whole stack (app + all three Go services + the Python
+reporting service + Postgres + RabbitMQ) onto any cluster - developed and tested against a local
 [minikube](https://minikube.sigs.k8s.io/) cluster (3 nodes, `docker` driver). **The real deployment
 path is now automated** - see [CI/CD Pipeline](#cicd-pipeline) below: push to `main` (or a `deploy`
 tag) and GitHub Actions + ArgoCD get the new code running with no `kubectl` involved at all. What
 follows here is the manual path - still fully working, useful for a first-time cluster bootstrap or
 quick local testing outside the pipeline.
 
-**1. Build the 4 app images and load them into the cluster** (minikube doesn't see your local Docker
+**1. Build the 5 app images and load them into the cluster** (minikube doesn't see your local Docker
 images by default - `minikube image load` copies them in):
 ```bash
 docker build -t banking-core:local ./banking
 docker build -t banking-notification:local ./notification-service
 docker build -t banking-fraud:local ./fraud-service
 docker build -t fx-service:local ./fx-service
+docker build -t reporting-service:local ./reporting-service
 minikube image load banking-core:local
 minikube image load banking-notification:local
 minikube image load banking-fraud:local
 minikube image load fx-service:local
+minikube image load reporting-service:local
 ```
 Rebuilding after a code change isn't enough on its own - see the note on `imagePullPolicy: Never`
 below the verification steps. (This only applies to these locally-tagged `:local` images built by
@@ -157,8 +167,9 @@ or a `deploy*` tag, builds and pushes all 4 images to GHCR, then commits the new
 itself - which **ArgoCD**, running inside the cluster, picks up and syncs automatically. Nobody runs
 `kubectl apply` for a real deploy anymore.
 
-The whole chain, in order: push -> `java-test`/`go-test` (real Postgres/RabbitMQ containers for Java,
-a build+test matrix across the three Go services) -> `build-and-push` (GHCR, tagged by git SHA) ->
+The whole chain, in order: push -> `java-test`/`go-test`/`python-test` (real Postgres/RabbitMQ
+containers for Java, a build+test matrix across the three Go services, a real Postgres container +
+`pytest` for the reporting service) -> `build-and-push` (GHCR, tagged by git SHA) ->
 `deployment` (bumps `k8s/*-deployment.yaml`'s image tags, commits with `[skip ci]` so it doesn't
 retrigger itself) -> ArgoCD notices the new commit on its own and rolls out new pods. See
 [architucture.md](architucture.md#cicd-pipeline-github-actions) for the full design, including several
@@ -263,6 +274,47 @@ the destination account actually received. A same-currency transfer works exactl
 design, including why the rate is fetched before the pessimistic account locks rather than after, and
 two real bugs caught and fixed while building it.
 
+## Reporting service
+
+[reporting-service/](reporting-service/) is the fourth companion service and the first in Python - a
+read-only reporting/analytics API over the same `core_banking` Postgres database the Java app owns.
+Unlike the three Go services, it isn't a RabbitMQ consumer at all: historical statements/summaries
+don't need a live event stream, they need the ledger tables, which it queries directly (its own
+SQLAlchemy models map onto the exact same tables the Java app's Flyway migrations create - this
+service never migrates or writes anything). Run it on its own:
+```bash
+cd reporting-service
+python -m venv venv && source venv/bin/activate
+pip install -r requirements.txt
+uvicorn app.main:app --reload --port 9093
+```
+Three endpoints, all under `http://localhost:9093`:
+- `GET /accounts/{account_id}/balance` - current balance, derived the same way the Java core service
+  derives it: `sum(CREDIT) - sum(DEBIT)` over that account's ledger entries. Never stored.
+- `GET /statements/{account_id}?from=&to=&format=json|csv` - every ledger entry in the given date
+  range, in chronological order, each annotated with a running balance (correct even when `from`
+  narrows the range, since the balance *as of* `from` is computed first and carried forward - see
+  [architucture.md](architucture.md#reporting-service)).
+- `GET /accounts/{account_id}/summary?from=&to=&format=json|csv` - counts and total amounts grouped by
+  transaction type and direction.
+
+Both `statement` and `summary` support `format=csv`, returned as a downloadable file via pandas'
+`to_csv`.
+
+**Run its tests** (needs its own Postgres database, kept separate from the app's real one):
+```bash
+cd reporting-service
+pytest
+```
+By default this targets a database named `test_core_banking` on `localhost:5432` (override with
+`TEST_DB_URL`/`TEST_DB_PORT`/`TEST_DB_NAME`/`TEST_DB_USERNAME`/`TEST_DB_PASSWORD`) - a schema
+completely separate from the app's own `core_banking`, so running the suite can never touch real
+data. Each test seeds the exact rows it needs directly via the ORM (bypassing Spring's auditing
+listener, which only runs from the Java side) and tears them down again afterward, verified to leave
+every table empty. See [architucture.md](architucture.md#reporting-service) for the full design,
+including a genuinely subtle SQLAlchemy session-lifecycle bug caught and fixed while building this
+suite.
+
 ## Configuration
 
 `application.properties` ships with a working local JWT secret (`jwt.secret`) and a 1-hour expiry (`jwt.expiration-ms`) so the app runs out of the box. **The committed secret is for local development only** - in any shared or deployed environment, this should come from an environment variable or a secrets manager instead, never from a file checked into version control. (This is exactly what the Kubernetes deployment above does - `JWT_SECRET` comes from `k8s/secret.yaml`, overriding the committed default.)
@@ -331,6 +383,15 @@ fx-service/
   main_test.go   first Go tests in this project (triangulation math, drift bounds)
   go.mod/go.sum
   Dockerfile     multi-stage build for this service
+
+reporting-service/
+  app/main.py            FastAPI app - GET balance/statements/summary, JSON + CSV
+  app/db/database.py     SQLAlchemy engine/session setup, reads the same DB_* env vars
+  app/models/            SQLAlchemy models mirroring the Java app's tables (read-only)
+  app/schemas/           Pydantic response models
+  tests/                 pytest suite (conftest.py fixtures + test_main.py), real Postgres
+  requirements.txt
+  Dockerfile             single-stage build (Alpine + pip install, no compile step to discard)
 
 .github/workflows/ci.yaml   GitHub Actions - test on every push, build/push to GHCR and deploy on
                              main/a deploy tag (see CI/CD pipeline above)

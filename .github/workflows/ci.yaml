@@ -5,6 +5,7 @@ on:
     branches:
       - main
       - gitops-dev
+      - report-dev
     tags:
       - 'deploy*'
 
@@ -105,12 +106,70 @@ jobs:
       - name: Build ${{ matrix.app }}
         working-directory: ${{ matrix.app }}
         run: GO_ENABLED=0 GOOS=linux go build -v -o ${{ matrix.app }} .
+
+  python-test:
+    name: Test the Python Service
+    runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        app:
+          - reporting-service
+    
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_USER: postgres
+          POSTGRES_DB: test_core_banking
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      # Postgres
+      DB_URL: localhost
+      DB_PORT: 5432
+      DB_USERNAME: postgres
+      DB_PASSWORD: postgres
+      DB_NAME: core_banking
+      TEST_DB_URL: localhost
+      TEST_DB_PORT: 5432
+      TEST_DB_NAME: test_core_banking
+      TEST_DB_USERNAME: postgres
+      TEST_DB_PASSWORD: postgres
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        working-directory: ${{ matrix.app }}
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Test ${{ matrix.app }}
+        working-directory: ${{ matrix.app }}
+        run: python -m pytest tests/test_main.py
     
   build-and-push:
     name: Build and Push Application on GHCR
     needs:
       - java-test
       - go-test
+      - python-test
+
     runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/deploy')
     permissions:
@@ -128,6 +187,8 @@ jobs:
             image: notification-service
           - app: fraud-service
             image: fraud-service
+          - app: reporting-service
+            image: reporting-service
 
     steps:
       - name: Checkout
@@ -152,6 +213,7 @@ jobs:
           context: ${{ matrix.app }}
           push: true
           tags: ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}:${{ github.sha }}
+
   deployment:
     needs:
       - build-and-push
@@ -174,15 +236,11 @@ jobs:
           sed -i "s|image: ghcr.io/sinaabdi/fx-service:.*|image: ghcr.io/sinaabdi/fx-service:${{ github.sha }}|" k8s/fx-deployment.yaml
           sed -i "s|image: ghcr.io/sinaabdi/notification-service:.*|image: ghcr.io/sinaabdi/notification-service:${{ github.sha }}|" k8s/notification-deployment.yaml
           sed -i "s|image: ghcr.io/sinaabdi/fraud-service:.*|image: ghcr.io/sinaabdi/fraud-service:${{ github.sha }}|" k8s/fraud-deployment.yaml
+          sed -i "s|image: ghcr.io/sinaabdi/reporting-service:.*|image: ghcr.io/sinaabdi/reporting-service:${{ github.sha }}|" k8s/reporting-deployment.yaml
 
       - name: Commit and push updated manifests
         run: |
           git add k8s/
           git commit -m "Deploy ${{ github.sha }} [skip ci]"
           git push
-
-
-
-
-
-     
+    

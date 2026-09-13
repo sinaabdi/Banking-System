@@ -86,6 +86,20 @@ services:
       - "9092:9092"
     networks:
       - backend
+  
+  report:
+    depends_on:
+      postgres:
+        condition: service_healthy
+    build:
+      context: ./reporting-service
+      dockerfile: Dockerfile
+    ports:
+      - "9093:9093"
+    env_file:
+      - ".env"
+    networks:
+      - backend
 
 volumes:
     postgres_data:
