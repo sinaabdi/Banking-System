@@ -15,7 +15,7 @@ spec:
     spec:
       containers:
         - name: notification
-          image: ghcr.io/sinaabdi/notification-service:9982b86ae628fed3775430532d160227c0d6af85
+          image: ghcr.io/sinaabdi/notification-service:98b5dc5453d4078a7a7312a2f066f48b8fb66fff
           ports:
             - containerPort: 9090
           env:
