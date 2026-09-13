@@ -8,7 +8,9 @@ class Base(DeclarativeBase):
     pass
 
 
-
+# Reads the same DB_* env vars the Java core service and every Go service already
+# use (k8s ConfigMap/Secret, docker-compose .env) - this service shares the one
+# Postgres instance and reads its tables directly, it doesn't run its own migrations.
 def get_database_url() -> str:
     host = os.environ.get('DB_URL')
     if host == "" or host == None:

@@ -14,6 +14,8 @@ class LedgerEntry(Base):
     account_id: Mapped[int] = mapped_column(ForeignKey('accounts.id'), nullable=False)
     account: Mapped['Account'] = relationship(back_populates="ledger_entries")
     transaction_direction: Mapped[TransactionDirection] = mapped_column(name='direction', nullable=False)
+    # Always positive; direction alone carries the sign. Every balance/statement/summary
+    # query in app/main.py assumes this and negates DEBIT rows itself.
     amount: Mapped[int] = mapped_column(name='amount', nullable=False)
     currency: Mapped[str] = mapped_column(name='currency', nullable=False)
     created_at: Mapped[datetime.datetime] = mapped_column(name='created_at')
