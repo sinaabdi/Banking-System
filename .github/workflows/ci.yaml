@@ -138,6 +138,11 @@ jobs:
       DB_USERNAME: postgres
       DB_PASSWORD: postgres
       DB_NAME: core_banking
+      TEST_DB_URL: localhost
+      TEST_DB_PORT: 5432
+      TEST_DB_NAME: test_core_banking
+      TEST_DB_USERNAME: postgres
+      TEST_DB_PASSWORD: postgres
 
     steps:
       - name: Checkout
@@ -156,7 +161,7 @@ jobs:
 
       - name: Test ${{ matrix.app }}
         working-directory: ${{ matrix.app }}
-        run: pytest
+        run: python -m pytest tests/test_main.py
     
   build-and-push:
     name: Build and Push Application on GHCR
