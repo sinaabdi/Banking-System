@@ -156,7 +156,7 @@ jobs:
 
       - name: Test ${{ matrix.app }}
         working-directory: ${{ matrix.app }}
-        run: pytest
+        run: python -m pytest tests/test_main.py
     
   build-and-push:
     name: Build and Push Application on GHCR

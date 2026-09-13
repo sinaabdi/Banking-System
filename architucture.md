@@ -209,6 +209,19 @@ originally `COPY --from=builder`'d `/app/fraud` - a copy-paste leftover from `fr
 not found`, proven directly rather than assumed, and fixed by copying the binary the builder stage
 actually produces.)
 
+`reporting-service/Dockerfile` is **single-stage**, deliberately unlike the four above - Python has no
+separate compile step producing a throwaway build toolchain the way `javac`/`go build` do, so there's
+nothing to discard by using two stages; `pip install -r requirements.txt` straight into the
+`python:3.12-alpine` runtime image is already the minimal footprint. Two real bugs caught building it:
+`useradd` (used by every other Dockerfile here to create a non-root user) doesn't exist on Alpine's
+`busybox`-based userland at all - fixed with Alpine's own `adduser -D app`, confirmed via a failed
+build (`useradd: not found`) rather than assumed upfront. Separately, `COPY app/ ./` (flattening the
+`app/` package directory into the image root) broke `uvicorn app.main:app` and every internal `app.*`
+import with `ModuleNotFoundError: No module named 'app'` at container *runtime*, not build time -
+Docker itself has no way to catch "this COPY silently changed a Python package's layout," so this was
+only found by actually running the built image and reading its logs. Fixed to `COPY app/ ./app/`,
+preserving the package structure `uvicorn`'s import path expects.
+
 `docker-compose.yml` runs `core`, `notification`, `fraud`, `fx`, `postgres`, and `rabbitmq` together,
 all on a `backend` bridge network so Compose's internal DNS resolves each by service name - unlike the
 host workflow, `localhost` inside any one container means that container itself, not any of the
@@ -278,6 +291,12 @@ retries a failed initial connection.
 - **`notification`** - 2 replicas, `env` sourced the same way as `core`'s RabbitMQ settings, plus
   `NOTIFICATION_QUEUE_NAME`. No `PersistentVolumeClaim` - it's stateless (an in-memory store), same as
   `core`.
+- **`reporting`** - **`replicas: 1`** for the simplest reason of all: it's entirely stateless (every
+  request re-derives its answer straight from Postgres, no in-process cache or tracker like `fx`/
+  `fraud` have), so more replicas would be a purely operational scaling decision with zero correctness
+  implications - one is simply enough at this project's scale. `env` sourced the same way as `core`'s
+  Postgres settings (`DB_URL`/`DB_PORT`/`DB_NAME`/`DB_USERNAME`/`DB_PASSWORD` from the same shared
+  `banking-config`/`banking-secret`), no RabbitMQ vars at all since it never touches the broker.
 - **`fraud`** - **`replicas: 1`, deliberately, for a different reason than `rabbitmq`'s.** It isn't a
   broker-clustering problem here - it's that `fraud`'s velocity tracker and flag store are both plain
   in-process memory with no shared backing store. If it ran with 2 replicas, both would bind the exact
@@ -616,9 +635,17 @@ remove the old image on every node -> reload -> scale back up -> `kubectl apply 
   built and tested whichever service happened to be hardcoded, under whichever name the matrix value
   currently was (e.g. `fraud-service`'s own code getting compiled into a binary named `fx`). Fixed by
   making every step in the matrix fully generic, none hardcoded to a specific service.
-- **`build-and-push`** (`needs: [java-test, go-test]`, gated `if: github.ref == 'refs/heads/main' ||
+- **`python-test`**: mirrors `java-test`'s shape for the reporting service - a real Postgres `services:`
+  container (not a matrix, since there's currently only one Python service, but kept as a
+  single-element `strategy.matrix` for the same reason `go-test` uses one: adding a second Python
+  service later needs no new job, just another matrix entry), `actions/setup-python`, then
+  `pip install -r requirements.txt` and `pytest`, each step needing its own explicit
+  `working-directory: ${{ matrix.app }}` since - unlike `java-test`, which only ever has one working
+  directory - this job's steps run relative to the repo root by default and would otherwise look for
+  `requirements.txt` there instead of inside `reporting-service/`.
+- **`build-and-push`** (`needs: [java-test, go-test, python-test]`, gated `if: github.ref == 'refs/heads/main' ||
   startsWith(github.ref, 'refs/tags/deploy*')` - only on the deployable branch or an explicit deploy
-  tag, never on every branch/PR): builds and pushes all 4 images to **GHCR** (GitHub Container
+  tag, never on every branch/PR): builds and pushes all 5 images to **GHCR** (GitHub Container
   Registry), chosen specifically because it authenticates with the same `GITHUB_TOKEN` every workflow
   already gets for free, versus a separate Docker Hub account and a new secret to manage. Images are
   tagged by **git SHA, not `latest`** - an immutable tag per build is what makes the next job
@@ -644,11 +671,11 @@ remove the old image on every node -> reload -> scale back up -> `kubectl apply 
     `denied: installation not allowed to Create organization package` on the first real push - GHCR
     packages also default to **private**, requiring a one-time manual switch to public in each
     package's settings so the cluster can pull them without needing `imagePullSecrets`.
-- **`deployment`** (`needs: build-and-push`, deliberately **not** matrixed): bumps all 4 manifests'
+- **`deployment`** (`needs: build-and-push`, deliberately **not** matrixed): bumps all 5 manifests'
   image tags to the new git SHA and commits the change back to the branch, with `[skip ci]` in the
-  message. Running this from *inside* the matrix job was considered and rejected: 4 parallel matrix
+  message. Running this from *inside* the matrix job was considered and rejected: 5 parallel matrix
   iterations each trying to commit and push their own one-file change to the same branch would race
-  each other, since all 4 start from the same base commit and only the first push can ever succeed as
+  each other, since all 5 start from the same base commit and only the first push can ever succeed as
   a fast-forward. A single, separate, non-matrixed job downstream of the whole matrix sidesteps the
   race entirely. Without `[skip ci]`, this job's own commit would re-trigger the whole workflow,
   which would build new images, commit again, trigger again - forever; `[skip ci]` in a commit message
@@ -698,3 +725,113 @@ not just assumed: a genuine push all the way from a code change through CI, imag
 automated tag-bump commit, to ArgoCD noticing that commit on its own and rolling out new pods - checked
 directly via the `Application`'s `.status.sync.revision` matching the exact new commit SHA, and each
 running pod's actual image tag matching it too, all without a single manual `kubectl` command.
+
+## Reporting Service
+
+[reporting-service/](reporting-service/) is the fourth companion service, the first written in Python,
+and the only one that's purely read-only - it never writes a row anywhere. Where
+`notification-service`/`fraud-service` react to events and `fx-service` answers a synchronous data
+dependency `core` needs mid-transfer, this service exists to answer a different kind of question
+entirely: "what happened, historically, on this account" - a question best answered by querying the
+ledger directly rather than reacting to a live stream of it.
+
+**Why no RabbitMQ.** Every other companion service is either a fanout consumer or a synchronous
+data dependency `core` calls before it can proceed. A balance, a statement, or a summary is neither -
+it's a read of data that already exists and isn't time-sensitive the way a fraud check or an FX rate
+is. Subscribing to `banking.transaction-events` would mean maintaining a second copy of the ledger in
+this service's own state just to answer questions Postgres can already answer directly, for no benefit.
+So this service queries `core_banking` on demand, with no queue, no exchange binding, and no dependency
+on RabbitMQ's availability at all.
+
+**Why FastAPI + SQLAlchemy, not raw `psycopg2`.** SQLAlchemy's ORM gives typed models
+(`app/models/`) that mirror the exact tables the Java app's Flyway migrations already created
+(`users`, `accounts`, `transactions`, `ledger_entries`) - this service declares its own Python classes
+for them rather than importing anything from the Java side (there's nothing to import across a
+language boundary), but the `__tablename__`/column mappings point at the identical schema. It **never
+migrates anything itself** - `Base.metadata.create_all()` is used only in the test suite, against a
+separate test database, never against the real `core_banking` schema the Java app owns.
+
+**A real bug from re-declaring the same schema in a second language**: `Account`/`User` were never
+actually imported anywhere the app runs (only `Transaction`/`LedgerEntry` were, via `main.py`'s direct
+imports), so SQLAlchemy's mapper registry never saw them - `relationship()`'s string forward references
+(e.g. `Mapped['Account']`) failed to resolve at `configure_mappers()` time, since a class SQLAlchemy has
+never imported doesn't exist in `Base.registry` yet. Fixed with `app/models/__init__.py`, which imports
+all four model modules unconditionally specifically so every one of them registers, regardless of which
+individual model a given request path happens to touch directly - see the comment left on that file for
+the mechanism, since it isn't obvious from the code alone.
+
+**Endpoints** (all under `app/main.py`, no auth - matching the same no-JWT precedent the three Go
+services already set, since this is another open internal service):
+
+- `GET /accounts/{account_id}/balance` - `sum(CASE WHEN direction = 'CREDIT' THEN amount ELSE -amount
+  END)` over that account's `ledger_entries`, the same derivation
+  `LedgerEntryRepository.computeBalanceForAccount` does on the Java side, reimplemented independently
+  in SQLAlchemy rather than shared - there's no code to share across the language boundary, only the
+  invariant (`amount` always positive, `direction` carries the sign - documented directly on
+  `LedgerEntry.amount` for exactly this reason). `.scalar()` returns `None` for an account with zero
+  ledger entries (a brand-new account, or one that simply has none in the queried range); that's
+  converted to `0` explicitly, since "no rows" and "balance of zero" mean the same thing here but
+  SQL's `SUM` doesn't know that.
+- `GET /statements/{account_id}?from=&to=&format=json|csv` - every ledger entry in the range, in
+  chronological order, each row annotated with a **running balance** computed via a SQL window
+  function (`func.sum(...).over(order_by=created_at)`) rather than a `GROUP BY`, specifically because a
+  window function produces one output row per input row with a running aggregate, where `GROUP BY`
+  would collapse the individual entries the whole point of a statement is to show.
+  - **A real running-balance bug, caught and fixed**: narrowing the range with `from=` reset the
+    running balance to start counting from zero at the first row in range, instead of continuing the
+    account's real historical balance. Fixed by computing the balance *as of* `from_date` first (via
+    the same `calculate_balance_for_account` helper the `/balance` endpoint uses, just with its
+    `date` parameter set), and adding that `opening_balance` onto every row's windowed sum - so a
+    statement for "the last week" shows the same running-balance numbers a full, unfiltered statement
+    would, not a story that starts over from zero at an arbitrary boundary.
+- `GET /accounts/{account_id}/summary?from=&to=&format=json|csv` - counts and total amounts, grouped by
+  `Transaction.type` and `LedgerEntry.transaction_direction` (a join back to `transactions`, since
+  `type` lives there, not on the ledger entry itself). Deliberately has **no `order_by`** - `GROUP BY`
+  doesn't guarantee row order without one, which the test suite treats as a real constraint rather than
+  an oversight (see Testing below: the summary test looks up each row by its `(type, direction)` key,
+  not by position).
+
+Both `statement` and `summary` support `format=csv`: the same query results, run through
+`pd.DataFrame([entry.model_dump() for entry in entries]).to_csv(index=False)` and returned as a file
+download. **A real bug here**: passing the Pydantic model objects straight to `pd.DataFrame(...)`
+instead of `.model_dump()`-ing them first produced garbled tuple-string columns - a Pydantic model is
+itself iterable as `(key, value)` pairs (used for things like `dict(model)`), so pandas silently
+iterated each model as a sequence of tuples instead of reading its fields as columns, rather than
+raising any error pointing at the actual mistake.
+
+**Testing** (`tests/`, pytest + a real Postgres database - the same philosophy as
+`TransactionServiceConcurrencyTest` on the Java side and the Go services' real-dependency tests: an ORM
+query against ledger math is exactly the kind of thing a mock can't meaningfully verify). `conftest.py`
+provides the shared fixtures every test file draws on without importing them - pytest auto-discovers a
+`conftest.py` in the same directory tree:
+
+- **A separate `test_core_banking` database**, driven by its own `TEST_DB_*` env vars (distinct from
+  the app's real `DB_*` ones), so running the suite can never read or corrupt real data. Each fixture
+  seeds the exact rows a test needs directly via ORM inserts - bypassing Spring's auditing listener
+  entirely (it only runs from the Java side), so `created_at`/`updated_at` have to be set explicitly by
+  hand, something the real app never has to do - and tears them back down afterward in FK-respecting
+  order, verified empirically (via direct `psql` queries) to leave every table empty between test runs.
+- **A genuinely subtle session-lifecycle bug, caught and fixed**: with SQLAlchemy's default
+  `expire_on_commit=True`, objects created in one fixture's teardown were seeing their relationship
+  collections silently reloaded from a stale state on next access, which confused the unit-of-work
+  into issuing a phantom `UPDATE ledger_entries SET transaction_id = NULL, account_id = NULL` during
+  teardown - violating a `NOT NULL` constraint that nothing in the test's own code ever asked to
+  violate. Diagnosed via SQL echo logging (seeing the exact unexpected statement fire) plus a clean
+  standalone repro that did *not* reproduce it outside pytest's specific object lifecycle, isolating
+  the cause; fixed with `expire_on_commit=False` on the fixture's `sessionmaker`.
+- **A deliberately-broken-then-fixed test**, run once while building this suite to prove it actually
+  fails red rather than just staying green because nothing meaningful is being asserted: temporarily
+  flipping the DEBIT case's negation in `calculate_balance_for_account` (`else_=LedgerEntry.amount`
+  instead of `else_=-LedgerEntry.amount`) made exactly one test fail (`test_get_balance_nets_to_zero`,
+  `assert 200 == 0`), while the other three passed untouched - each for a distinct, traceable reason
+  (an empty-ledger test never reaches the broken CASE at all; the statement/summary tests each carry
+  their own independent CASE expression, never shared with the broken function). That precise,
+  narrowly-scoped failure - not a vague cascade - is exactly what a well-isolated test suite should
+  produce when one specific piece of logic breaks.
+
+**Config**: the same `DB_URL`/`DB_PORT`/`DB_NAME`/`DB_USERNAME`/`DB_PASSWORD` env vars every other
+service already reads from `banking-config`/`banking-secret` (Kubernetes) or `.env` (Docker Compose) -
+no new ConfigMap/Secret keys needed, since this service reuses the same Postgres credentials the Java
+app already has. See [Containerization](#containerization) above for why its `Dockerfile` is
+single-stage, and [Kubernetes Deployment](#kubernetes-deployment) above for why it runs at
+`replicas: 1`.
