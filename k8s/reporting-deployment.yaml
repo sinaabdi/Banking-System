@@ -15,7 +15,7 @@ spec:
     spec:
       containers:
         - name: reporting
-          image: ghcr.io/sinaabdi/reporting-service:98b5dc5453d4078a7a7312a2f066f48b8fb66fff
+          image: ghcr.io/sinaabdi/reporting-service:708d5a09077bd64075ce8763bd29e5c60d9b53fd
           ports:
             - containerPort: 9093
           env:
