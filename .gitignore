@@ -72,6 +72,3 @@ ENV/
 
 # Kubernetes secret file
 k8s/secret.yaml
-
-# GitHub Actions Logs
-github-actions-logs

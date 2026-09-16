@@ -6,9 +6,11 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
+	jwt "github.com/golang-jwt/jwt/v5"
 	amqp "github.com/rabbitmq/amqp091-go"
 )
 
@@ -66,7 +68,7 @@ func main() {
 	}()
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /notifications", listHandler)
+	mux.HandleFunc("GET /notifications", requireAdmin(listHandler))
 
 	log.Println("Notification server listening on port 9090...")
 	if err := http.ListenAndServe(":9090", mux); err != nil {
@@ -187,4 +189,44 @@ func getRabbitMQURL() string {
 	}
 
 	return fmt.Sprintf("amqp://%s:%s@%s:%s", username, password, host, port) // amqp://guest:guest@localhost:5672/
+}
+
+func getJWTSecret() string {
+	secret := os.Getenv("JWT_SECRET")
+	if secret == "" {
+		log.Fatalln("Error: failed to read the JWT secret")
+	}
+	return secret
+}
+
+func requireAdmin(next http.HandlerFunc) http.HandlerFunc {
+
+	return func(w http.ResponseWriter, r *http.Request) {
+
+		authorization := r.Header.Get("Authorization")
+		token, ok := strings.CutPrefix(authorization, "Bearer ")
+		if !ok {
+			http.Error(w, "jwt token does not exist in the request", http.StatusUnauthorized)
+			return
+		}
+
+		parsedToken, err := jwt.Parse(token, func(t *jwt.Token) (interface{}, error) { return []byte(getJWTSecret()), nil }, jwt.WithValidMethods([]string{"HS512"}))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusUnauthorized)
+			return
+		}
+
+		claims, ok := parsedToken.Claims.(jwt.MapClaims)
+		if !ok || !parsedToken.Valid {
+			http.Error(w, "invalid token", http.StatusUnauthorized)
+			return
+		}
+
+		if claims["role"] == "ADMIN" {
+			next(w, r)
+		} else {
+			http.Error(w, "access denied", http.StatusForbidden)
+			return
+		}
+	}
 }

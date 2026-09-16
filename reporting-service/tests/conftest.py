@@ -3,6 +3,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from app.main import app
 from app.db.database import Base, get_db
+from app.auth.auth import get_current_user
 from app.models.user import User, UserRole, UserStatus
 from app.models.account import Account, AccountStatus, AccountType
 from app.models.transaction import (
@@ -308,3 +309,32 @@ def get_mock_ledger_entries(account_id: int, transaction_id: int, direction: Tra
         currency="USD",
         created_at=now - datetime.timedelta(minutes=min)
     )
+
+# def get_mock_current_user_admin():
+#     return {
+#         "role": "ADMIN",
+#         "user_id": 1
+#     }
+
+# def get_mock_current_user_non_admin():
+#     return {
+#         "role": "USER",
+#         "user_id": seeded_account.user_id
+#     }
+
+# def get_mock_current_user_id_does_not_match():
+#     return {
+#         "role": "USER",
+#         "user_id": seeded_account.user_id + 1
+#     }
+
+# def get_mock_current_user_does_not_exist():
+#     return {
+#         "role": "USER",
+#         "user_id": 999
+#     }
+
+def make_mock_current_user(role, user_id):
+    def _mock():
+        return {"role": role, "user_id": user_id}
+    return _mock

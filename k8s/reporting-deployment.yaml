@@ -44,3 +44,8 @@ spec:
                 secretKeyRef:
                   key: DB_PASSWORD
                   name: banking-secret
+            - name: JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  key: JWT_SECRET
+                  name: banking-secret

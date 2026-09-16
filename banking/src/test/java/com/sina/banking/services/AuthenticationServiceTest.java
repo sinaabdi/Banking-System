@@ -3,6 +3,7 @@ package com.sina.banking.services;
 import com.sina.banking.DTOs.AuthDTOs.LoginRequest;
 import com.sina.banking.DTOs.AuthDTOs.LoginResponse;
 import com.sina.banking.security.AppUserDetailsService;
+import com.sina.banking.security.AppUserPrincipal;
 import com.sina.banking.security.JwtService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -12,7 +13,6 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.security.authentication.AuthenticationManager;
 import org.springframework.security.authentication.BadCredentialsException;
-import org.springframework.security.core.userdetails.UserDetails;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -44,9 +44,9 @@ public class AuthenticationServiceTest {
     @Test
     void login_successfulLogin() {
         String fakeToken = "fake.jwt.token";
-        UserDetails userDetails = mock(UserDetails.class);
-        when(userDetailsService.loadUserByUsername(loginRequest.username())).thenReturn(userDetails);
-        when(jwtService.generateJwtToken(userDetails)).thenReturn(fakeToken);
+        AppUserPrincipal userPrincipal = mock(AppUserPrincipal.class);
+        when(userDetailsService.loadUserByUsername(loginRequest.username())).thenReturn(userPrincipal);
+        when(jwtService.generateJwtToken(userPrincipal)).thenReturn(fakeToken);
 
         LoginResponse response = authenticationService.login(loginRequest);
 

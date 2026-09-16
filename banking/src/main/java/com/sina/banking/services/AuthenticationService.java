@@ -3,13 +3,12 @@ package com.sina.banking.services;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.security.authentication.AuthenticationManager;
-import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
-import org.springframework.security.core.userdetails.UserDetails;
-import org.springframework.stereotype.Service;
+import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;import org.springframework.stereotype.Service;
 
 import com.sina.banking.DTOs.AuthDTOs.LoginRequest;
 import com.sina.banking.DTOs.AuthDTOs.LoginResponse;
 import com.sina.banking.security.AppUserDetailsService;
+import com.sina.banking.security.AppUserPrincipal;
 import com.sina.banking.security.JwtService;
 
 @Service
@@ -39,8 +38,8 @@ public class AuthenticationService {
 
         // Reloaded rather than taken from authToken's result - simpler to reason about, at the
         // cost of one extra lookup we could avoid by casting the Authentication's principal.
-        UserDetails userDetails = appUserDetailsService.loadUserByUsername(request.username());
-        String token = jwtService.generateJwtToken(userDetails);
+        AppUserPrincipal userPrincipal = (AppUserPrincipal) appUserDetailsService.loadUserByUsername(request.username());
+        String token = jwtService.generateJwtToken(userPrincipal);
         log.info("Login succeeded for username={}", request.username());
         return new LoginResponse(token);
     }

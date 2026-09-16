@@ -242,5 +242,5 @@ jobs:
         run: |
           git add k8s/
           git commit -m "Deploy ${{ github.sha }} [skip ci]"
-          git push
+          git push origin HEAD:main
     
