@@ -29,16 +29,18 @@ public class JwtService {
     @Value("${jwt.expiration-ms}")
     private long expirationMs;
 
-    public String generateJwtToken(UserDetails userDetails) {
+    public String generateJwtToken(AppUserPrincipal userPrincipal) {
         Instant expiry = Instant.now().plusMillis(expirationMs);
 
         String token = Jwts.builder()
-            .subject(userDetails.getUsername())
+            .subject(userPrincipal.getUsername())
             .issuedAt(new Date())
+            .claim("role", userPrincipal.isAdmin() ? "ADMIN" : "USER")
+            .claim("user_id", userPrincipal.getId())
             .expiration(Date.from(expiry))
             .signWith(getSigningKey())
             .compact();
-        log.debug("Generated JWT for username={}, expiresAt={}", userDetails.getUsername(), expiry);
+        log.debug("Generated JWT for username={}, expiresAt={}", userPrincipal.getUsername(), expiry);
         return token;
     }
 

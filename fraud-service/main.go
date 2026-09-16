@@ -7,9 +7,11 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
+	jwt "github.com/golang-jwt/jwt/v5"
 	amqp "github.com/rabbitmq/amqp091-go"
 )
 
@@ -131,7 +133,7 @@ func main() {
 	}()
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /flags", listFlagsHandler)
+	mux.HandleFunc("GET /flags", requireAdmin(listFlagsHandler))
 
 	if err := http.ListenAndServe(":9091", mux); err != nil {
 		log.Fatalf("fraud server failed: %v", err)
@@ -290,4 +292,43 @@ func scoreTransaction(t Transaction) []string {
 	}
 
 	return reasons
+}
+
+func getJWTSecret() string {
+	secret := os.Getenv("JWT_SECRET")
+	if secret == "" {
+		log.Fatalln("Error: failed to read the JWT secret")
+	}
+	return secret
+}
+
+func requireAdmin(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		authorization := r.Header.Get("Authorization")
+		token, ok := strings.CutPrefix(authorization, "Bearer ")
+		if !ok {
+			http.Error(w, "jwt token does not exist in the request", http.StatusUnauthorized)
+			return
+		}
+
+		parsedToken, err := jwt.Parse(token, func(t *jwt.Token) (any, error) {return []byte(getJWTSecret()), nil}, jwt.WithValidMethods([]string{"HS512"}))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusUnauthorized)
+			return
+		}
+
+		claims, ok := parsedToken.Claims.(jwt.MapClaims)
+		if !ok || !parsedToken.Valid {
+			http.Error(w, "invalid token", http.StatusUnauthorized)
+			return
+		}
+
+		if claims["role"] == "ADMIN" {
+			next(w, r)
+		} else {
+			http.Error(w, "access denied", http.StatusForbidden)
+			return
+		}
+
+	}
 }

@@ -16,6 +16,8 @@ from app.models.account import Account
 from app.schemas.statement_entry import StatementEntry
 from app.schemas.summary_entry import SummaryEntry
 
+from app.auth.auth import require_account_access
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -50,7 +52,7 @@ def calculate_balance_for_account(
 
 
 @app.get("/accounts/{account_id}/balance")
-def get_balance(account_id: int, db: Session = Depends(get_db)):
+def get_balance(account_id: int, db: Session = Depends(get_db), _: None = Depends(require_account_access)):
     logger.info("Fetching balance for account_id=%s", account_id)
     return calculate_balance_for_account(account_id=account_id, db=db)
 
@@ -62,6 +64,7 @@ def get_statements(
     from_date: datetime.date | None = Query(default=None, alias="from"),
     to_date: datetime.date | None = Query(default=None, alias="to"),
     format: Literal["json", "csv"] = Query(default="json"),
+    _: None = Depends(require_account_access)
 ) -> list[StatementEntry]:
     logger.info(
         "Fetching statement for account_id=%s from=%s to=%s format=%s",
@@ -160,6 +163,7 @@ def get_account_summary(
     from_date: datetime.date | None = Query(default=None, alias="from"),
     to_date: datetime.date | None = Query(default=None, alias="to"),
     format: Literal["json", "csv"] = Query(default="json"),
+    _: None = Depends(require_account_access)
 ) -> list[SummaryEntry]:
     logger.info(
         "Fetching summary for account_id=%s from=%s to=%s format=%s",

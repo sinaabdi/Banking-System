@@ -49,3 +49,8 @@ spec:
                 configMapKeyRef:
                   key: NOTIFICATION_QUEUE_NAME
                   name: banking-config
+            - name: JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  key: JWT_SECRET
+                  name: banking-secret
