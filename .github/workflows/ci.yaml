@@ -170,7 +170,7 @@ jobs:
       - python-test
 
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/deploy')
+    if: github.ref == 'refs/heads/redis-dev' || startsWith(github.ref, 'refs/tags/deploy')
     permissions:
       contents: read
       packages: write
