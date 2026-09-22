@@ -4,8 +4,7 @@ on:
   push:
     branches:
       - main
-      - gitops-dev
-      - report-dev
+      - redis-dev
     tags:
       - 'deploy*'
 

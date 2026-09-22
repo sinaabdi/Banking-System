@@ -4,7 +4,7 @@ metadata:
   namespace: banking
   name: fx
 spec:
-  replicas: 1
+  replicas: 2
   selector:
     matchLabels:
       app: fx
@@ -15,8 +15,19 @@ spec:
     spec:
       containers:
         - name: fx
-          image: ghcr.io/sinaabdi/fx-service:708d5a09077bd64075ce8763bd29e5c60d9b53fd
+          image: fx-service:local
           ports:
             - containerPort: 9092
+          env:
+            - name: REDIS_HOST
+              valueFrom:
+                configMapKeyRef:
+                  key: REDIS_HOST
+                  name: banking-config
+            - name: REDIS_PORT
+              valueFrom:
+                configMapKeyRef:
+                  key: REDIS_PORT
+                  name: banking-config
 
     
