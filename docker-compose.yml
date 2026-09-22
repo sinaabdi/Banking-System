@@ -79,11 +79,16 @@ services:
       - backend
   
   fx:
+    depends_on:
+      redis:
+        condition: service_healthy
     build:
       context: ./fx-service
       dockerfile: Dockerfile
     ports:
       - "9092:9092"
+    env_file:
+      - ".env"
     networks:
       - backend
   
@@ -100,10 +105,26 @@ services:
       - ".env"
     networks:
       - backend
+  
+  redis:
+    image: redis:8.10
+    ports:
+      - '6379:6379'
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    networks:
+      - backend
 
 volumes:
     postgres_data:
     rabbitmq_data:
+    redis_data:
 
 networks:
   backend:

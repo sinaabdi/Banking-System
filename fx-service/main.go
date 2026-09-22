@@ -1,18 +1,68 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"math/rand"
 	"net/http"
+	"os"
+	"strconv"
 	"sync"
 	"time"
+
+	uuid "github.com/google/uuid"
+	redis "github.com/redis/go-redis/v9"
 )
 
+var initialRates = map[string]Rates{
+	"USD": {
+		Currency:    "USD",
+		Description: "U.S. Dollar",
+		Rate:        1.0,
+	},
+	"EUR": {
+		Currency:    "EUR",
+		Description: "Euro",
+		Rate:        0.92,
+	},
+	"GBP": {
+		Currency:    "GBP",
+		Description: "British Pound Sterling",
+		Rate:        0.79,
+	},
+	"JPY": {
+		Currency:    "JPY",
+		Description: "Japanese Yen",
+		Rate:        149.0,
+	},
+	"CAD": {
+		Currency:    "CAD",
+		Description: "Canadian Dollar",
+		Rate:        1.36,
+	},
+	"AUD": {
+		Currency:    "AUD",
+		Description: "Australian Dollar",
+		Rate:        1.52,
+	},
+	"CHF": {
+		Currency:    "CHF",
+		Description: "Swiss Franc",
+		Rate:        0.88,
+	},
+}
+
 var (
-	rateTable = createRateTable()
-	mu        sync.Mutex
+	currencyCodes []string
+	mu            sync.Mutex
+	rdsClient     *redis.Client
+	rdsRateKey    string = "fx:rates"
+	rdsLeaderKey  string = "fx:drift-leader"
+	instanceID    uuid.UUID
+	rdsScript     = redis.NewScript("if redis.call(\"get\", KEYS[1]) == ARGV[1] then return redis.call(\"del\", KEYS[1]) else return 0 end")
 )
 
 type Rates struct {
@@ -27,22 +77,23 @@ type Response struct {
 	Rate float64 `json:"rate"`
 }
 
+func init() {
+	rdsClient = redis.NewClient(&redis.Options{Addr: getRedisAddr(), Password: ""})
+	for k, v := range initialRates {
+		if k == "USD" {continue}
+		currencyCodes = append(currencyCodes, v.Currency)
+	}
+	
+	instanceID = uuid.New()
+	createRateTable()
+}
+
 func main() {
 
 	go func() {
 		for {
 			time.Sleep(time.Second * 2)
-			mu.Lock()
-			for key, val := range rateTable {
-				if val.Currency == "USD" {
-					continue
-				}
-
-				val.Rate = applyDrift(val.Rate)
-
-				rateTable[key] = val
-			}
-			mu.Unlock()
+			driftTick()
 		}
 	}()
 
@@ -71,38 +122,47 @@ func handleRateRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	mu.Lock()
-	defer mu.Unlock()
-
-	fromCurrency, ok := rateTable[from]
-	if !ok {
-		log.Printf("Error: the %s currency is not supported.", from)
-		w.WriteHeader(http.StatusBadRequest)
-		w.Write([]byte("unsupported currency: " + from))
-
-		return
-	}
-
-	toCurrency, ok := rateTable[to]
-	if !ok {
-		log.Printf("Error: the %s currency is not supported.", to)
-		w.WriteHeader(http.StatusBadRequest)
-		w.Write([]byte("unsupported currency: " + to))
+	fromRate, err := getRate(from)
+	if err != nil {
+		if errors.Is(err, redis.Nil) {
+			log.Printf("Error: the %s currency is not supported.", from)
+			w.WriteHeader(http.StatusBadRequest)
+			w.Write([]byte("unsupported currency: " + from))
+		} else {
+			log.Printf("Error: failed to fetch the rate for %s currency.", from)
+			w.WriteHeader(http.StatusInternalServerError)
+			w.Write([]byte("failed to get rate of " + from))
+		}
 
 		return
 	}
 
-	if toCurrency.Rate <= 0.0 || fromCurrency.Rate <= 0 {
-		log.Printf("Error: one of currencies has invalid value. from: %f, to: %f", fromCurrency.Rate, toCurrency.Rate)
-		w.WriteHeader(http.StatusBadRequest)
-		w.Write([]byte(fmt.Sprintf("Error: one of currencies has invalid value. from: %f, to: %f", fromCurrency.Rate, toCurrency.Rate)))
+	toRate, err := getRate(to)
+	if err != nil {
+		if errors.Is(err, redis.Nil) {
+			log.Printf("Error: the %s currency is not supported.", to)
+			w.WriteHeader(http.StatusBadRequest)
+			w.Write([]byte("unsupported currency: " + to))
+		} else {
+			log.Printf("Error: failed to fetch the rate for %s currency.", to)
+			w.WriteHeader(http.StatusInternalServerError)
+			w.Write([]byte("failed to get rate of " + to))
+		}
 
 		return
 	}
 
-	rate := triangulate(fromCurrency.Rate, toCurrency.Rate)
+	if toRate <= 0.0 || fromRate <= 0 {
+		log.Printf("Error: one of currencies has invalid value. from: %f, to: %f", fromRate, toRate)
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(fmt.Sprintf("Error: one of currencies has invalid value. from: %f, to: %f", fromRate, toRate)))
 
-	response := Response{From: fromCurrency.Currency, To: toCurrency.Currency, Rate: rate}
+		return
+	}
+
+	rate := triangulate(fromRate, toRate)
+
+	response := Response{From: from, To: to, Rate: rate}
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
@@ -114,54 +174,56 @@ func handleRateRequest(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleAllRates(w http.ResponseWriter, r *http.Request) {
-	mu.Lock()
-	defer mu.Unlock()
+
+	rates, err := getAllRates()
+	if err != nil {
+		log.Printf("failed to fetch all rates: %v", err)
+		return
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	if err := json.NewEncoder(w).Encode(rateTable); err != nil {
+	if err := json.NewEncoder(w).Encode(rates); err != nil {
 		log.Printf("Failed to convert all rates to json: %v", err)
 	}
 }
 
-func createRateTable() map[string]Rates {
-	return map[string]Rates{
-		"USD": {
-			Currency:    "USD",
-			Description: "U.S. Dollar",
-			Rate:        1.0,
-		},
-		"EUR": {
-			Currency:    "EUR",
-			Description: "Euro",
-			Rate:        0.92,
-		},
-		"GBP": {
-			Currency:    "GBP",
-			Description: "British Pound Sterling",
-			Rate:        0.79,
-		},
-		"JPY": {
-			Currency:    "JPY",
-			Description: "Japanese Yen",
-			Rate:        149.0,
-		},
-		"CAD": {
-			Currency:    "CAD",
-			Description: "Canadian Dollar",
-			Rate:        1.36,
-		},
-		"AUD": {
-			Currency:    "AUD",
-			Description: "Australian Dollar",
-			Rate:        1.52,
-		},
-		"CHF": {
-			Currency:    "CHF",
-			Description: "Swiss Franc",
-			Rate:        0.88,
-		},
+func createRateTable() {
+	for _, val := range initialRates {
+		rdsClient.HSetNX(context.Background(), rdsRateKey, val.Currency, strconv.FormatFloat(val.Rate, 'f', -1, 64))
 	}
+}
+
+func getRate(currency string) (float64, error) {
+	res, err := rdsClient.HGet(context.Background(), rdsRateKey, currency).Result()
+	if err != nil {
+		return 0.0, err
+	}
+	rate, err := strconv.ParseFloat(res, 64)
+	if err != nil {
+		return 0.0, err
+	}
+
+	return rate, nil
+}
+
+func getAllRates() (map[string]Rates, error) {
+	res, err := rdsClient.HGetAll(context.Background(), rdsRateKey).Result()
+	if err != nil {
+		return nil, err
+	}
+
+	rates := make(map[string]Rates)
+	for key, val := range res {
+		rateFloat, err := strconv.ParseFloat(val, 64)
+		if err != nil {
+			return nil, err
+		}
+		rates[key] = Rates{Currency: key, Rate: rateFloat, Description: ""}
+	}
+
+	return rates, nil
+
 }
 
 func triangulate(fromRate, toRate float64) float64 {
@@ -170,5 +232,52 @@ func triangulate(fromRate, toRate float64) float64 {
 
 func applyDrift(rate float64) float64 {
 	drift := (rand.Float64()*2 - 1) * 0.005
-	return  rate * (1 + drift)
+	return rate * (1 + drift)
+}
+
+func getRedisAddr() string {
+	host := os.Getenv("REDIS_HOST")
+	if host == "" {
+		host = "localhost"
+	}
+
+	port := os.Getenv("REDIS_PORT")
+	if port == "" {
+		port = "6379"
+	}
+
+	return fmt.Sprintf("%s:%s", host, port)
+}
+
+func driftTick() {
+	mu.Lock()
+	defer mu.Unlock()
+
+	// Lock the Redis
+	keyIsMine, err := rdsClient.SetNX(context.Background(), rdsLeaderKey, instanceID, time.Second*2).Result()
+	if err != nil {
+		log.Printf("failed to set redis distributed key: %v", err)
+		return
+	}
+
+	if !keyIsMine {
+		return
+	}
+
+	for _, code := range currencyCodes {
+
+		rate, err := getRate(code)
+		if err != nil {
+			log.Printf("failed to get %s rate for drift tick: %v", code, err)
+			continue
+		}
+
+		drift := applyDrift(rate)
+		rdsClient.HSet(context.Background(), rdsRateKey, map[string]string{code: strconv.FormatFloat(drift, 'f', -1, 64)})
+	}
+
+	// Release Redis Lock
+	if _, err = rdsScript.Run(context.Background(), rdsClient, []string{rdsLeaderKey}, instanceID).Result(); err != nil {
+		log.Printf("failed to release the lock: %v", err)
+	}
 }
