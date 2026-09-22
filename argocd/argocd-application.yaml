@@ -7,8 +7,7 @@ spec:
   project: default
   source:
     repoURL: https://github.com/sinaabdi/Banking-System.git
-    # targetRevision: main
-    targetRevision: redis-dev
+    targetRevision: main
     path: k8s
   destination:
     server: https://kubernetes.default.svc
