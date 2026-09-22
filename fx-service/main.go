@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"os"
 	"strconv"
-	"sync"
 	"time"
 
 	uuid "github.com/google/uuid"
@@ -57,7 +56,6 @@ var initialRates = map[string]Rates{
 
 var (
 	currencyCodes []string
-	mu            sync.Mutex
 	rdsClient     *redis.Client
 	rdsRateKey    string = "fx:rates"
 	rdsLeaderKey  string = "fx:drift-leader"
@@ -250,9 +248,6 @@ func getRedisAddr() string {
 }
 
 func driftTick() {
-	mu.Lock()
-	defer mu.Unlock()
-
 	// Lock the Redis
 	keyIsMine, err := rdsClient.SetNX(context.Background(), rdsLeaderKey, instanceID, time.Second*2).Result()
 	if err != nil {
